@@ -1,0 +1,27 @@
+DROP INDEX IF EXISTS idx_jobs_source;
+DROP INDEX IF EXISTS idx_jobs_status;
+DROP INDEX IF EXISTS idx_scores_priority;
+DROP INDEX IF EXISTS idx_scores_business;
+DROP INDEX IF EXISTS idx_audit_business;
+DROP INDEX IF EXISTS idx_social_business;
+DROP INDEX IF EXISTS idx_contacts_business;
+DROP INDEX IF EXISTS idx_technologies_name;
+DROP INDEX IF EXISTS idx_technologies_website;
+DROP INDEX IF EXISTS idx_crawl_results_website;
+DROP INDEX IF EXISTS idx_websites_business;
+DROP INDEX IF EXISTS idx_businesses_dedup;
+DROP INDEX IF EXISTS idx_businesses_source_key;
+DROP INDEX IF EXISTS idx_businesses_website;
+DROP INDEX IF EXISTS idx_businesses_source;
+DROP INDEX IF EXISTS idx_businesses_category;
+
+DROP TABLE IF EXISTS scrape_jobs;
+DROP TABLE IF EXISTS lead_scores;
+DROP TABLE IF EXISTS audit_reports;
+DROP TABLE IF EXISTS social_profiles;
+DROP TABLE IF EXISTS contacts;
+DROP TABLE IF EXISTS technologies;
+DROP TABLE IF EXISTS crawl_results;
+DROP TABLE IF EXISTS websites;
+DROP TABLE IF EXISTS businesses;
+DROP TABLE IF EXISTS sources;

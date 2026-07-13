@@ -1,0 +1,12 @@
+build/
+coverage.*
+.env
+*.log
+dist/
+tmp/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
