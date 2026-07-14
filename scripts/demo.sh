@@ -96,24 +96,44 @@ ok "worker ready ${DIM}(logs: ${LOG_DIR}/worker.log)${RESET}"
 
 # ------------------------------------------------------------------ run
 
-step "Importing data/sample-leads.csv"
+CATEGORY="${CATEGORY:-bakery}"
+LOCATION="${LOCATION:-Kochi}"
+LIMIT="${LIMIT:-10}"
+
+step "Scraping Google Maps: ${CATEGORY} in ${LOCATION} (limit ${LIMIT})"
+
+if ! curl -sf "${API}/api/v1/scrape/sources" | grep -q google_maps; then
+  die "the google_maps source is not registered; check the API log: ${LOG_DIR}/api.log"
+fi
 
 curl -sf -X POST "${API}/api/v1/scrape" \
   -H 'Content-Type: application/json' \
-  -d '{"source":"csv","file":"sample-leads.csv","category":"cafe"}' >/dev/null \
+  -d "{\"source\":\"google_maps\",\"category\":\"${CATEGORY}\",\"location\":\"${LOCATION}\",\"limit\":${LIMIT}}" >/dev/null \
   || die "could not queue the scrape job"
 ok "job queued"
 
 step "Waiting for the pipeline"
-printf '  %scollect_business -> website_crawl -> rule_scoring -> gen_recommendation%s\n\n' "$DIM" "$RESET"
+printf '  %scollect_business -> website_crawl -> rule_scoring -> gen_recommendation%s\n' "$DIM" "$RESET"
+printf '  %sThe Maps scrape drives a headless browser, so the first stage is slow.%s\n\n' "$DIM" "$RESET"
 
-# The crawl reaches out to the real internet, so give it room.
-for _ in $(seq 1 45); do
-  if [[ "$(grep -c 'gen_recommendation' "${LOG_DIR}/worker.log" 2>/dev/null || echo 0)" -ge 3 ]]; then
-    break
+# A browser-driven Maps scrape takes minutes, and each business is then crawled.
+# Wait for the pipeline to go quiet rather than for a fixed number of jobs.
+idle=0
+for _ in $(seq 1 180); do
+  depth="$(curl -sf "${API}/api/v1/ready" | sed -E 's/.*"queue_depth":([0-9]+).*/\1/')"
+  scored="$(grep -c 'lead scored' "${LOG_DIR}/worker.log" 2>/dev/null || echo 0)"
+
+  if [[ "${depth:-1}" == "0" && "$scored" -gt 0 ]]; then
+    idle=$((idle + 1))
+    # Two consecutive empty polls means the worker really is done, not just
+    # between jobs.
+    [[ $idle -ge 2 ]] && break
+  else
+    idle=0
   fi
+
   printf '.'
-  sleep 2
+  sleep 5
 done
 printf '\n'
 

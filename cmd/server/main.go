@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/makeforme/leadscraper/internal/adapters/api"
 	"github.com/makeforme/leadscraper/internal/adapters/csv"
@@ -37,9 +39,20 @@ func main() {
 }
 
 func run() error {
-	var isWorker bool
-	flag.BoolVar(&isWorker, "worker", false, "start in worker mode")
+	// With no flags the process runs the API and the worker together. That makes
+	// the whole app one command, and on a small machine one Go process is
+	// meaningfully cheaper than two. The split flags exist for when you want to
+	// scale the worker separately.
+	var (
+		workerOnly = flag.Bool("worker", false, "run only the worker")
+		apiOnly    = flag.Bool("api", false, "run only the API")
+	)
 	flag.Parse()
+
+	if *workerOnly && *apiOnly {
+		return errors.New("--worker and --api are mutually exclusive; pass neither to run both")
+	}
+	runAPI, runWorker := !*workerOnly, !*apiOnly
 
 	// Both modes shut down on SIGINT/SIGTERM. The worker previously ran on a
 	// background context and could not be stopped at all.
@@ -54,8 +67,11 @@ func run() error {
 	log := logger.New(cfg.LogLevel, cfg.Environment)
 	slog.SetDefault(log)
 
-	mode := "api"
-	if isWorker {
+	mode := "api+worker"
+	switch {
+	case !runWorker:
+		mode = "api"
+	case !runAPI:
 		mode = "worker"
 	}
 	log.Info("starting leadscraper",
@@ -99,7 +115,11 @@ func run() error {
 	r := newRepos(pool)
 	sources := newSources(cfg, log)
 
-	if isWorker {
+	// Both halves share this context, so one Ctrl-C stops the whole app and the
+	// worker still gets to drain its in-flight jobs.
+	group, gctx := errgroup.WithContext(ctx)
+
+	if runWorker {
 		deps := &workers.Deps{
 			Businesses:   r.businesses,
 			Websites:     r.websites,
@@ -120,25 +140,33 @@ func run() error {
 			AICfg:      cfg.AI,
 		}
 
-		return workers.NewWorker(q, deps, cfg.Worker, log).Start(ctx)
+		worker := workers.NewWorker(q, deps, cfg.Worker, log)
+		group.Go(func() error { return worker.Start(gctx) })
 	}
 
-	router := api.NewRouter(api.RouterDeps{
-		Version:    cfg.Version,
-		APIKey:     cfg.Auth.APIKey,
-		Pool:       pool,
-		Queue:      q,
-		Businesses: r.businesses,
-		Websites:   r.websites,
-		Contacts:   r.contacts,
-		Socials:    r.socials,
-		Scores:     r.scores,
-		Audits:     r.audits,
-		Jobs:       r.jobs,
-		Sources:    sources,
-	})
+	if runAPI {
+		router := api.NewRouter(api.RouterDeps{
+			Version:    cfg.Version,
+			APIKey:     cfg.Auth.APIKey,
+			Pool:       pool,
+			Queue:      q,
+			Businesses: r.businesses,
+			Websites:   r.websites,
+			Contacts:   r.contacts,
+			Socials:    r.socials,
+			Scores:     r.scores,
+			Audits:     r.audits,
+			Jobs:       r.jobs,
+			Sources:    sources,
+		})
 
-	return api.NewServer(cfg.Port, router, log).Start(ctx)
+		srv := api.NewServer(cfg.Port, router, log)
+		group.Go(func() error { return srv.Start(gctx) })
+
+		log.Info("dashboard ready", "url", fmt.Sprintf("http://localhost:%d", cfg.Port))
+	}
+
+	return group.Wait()
 }
 
 type repos struct {

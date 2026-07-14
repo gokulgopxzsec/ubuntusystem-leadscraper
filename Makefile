@@ -1,4 +1,4 @@
-.PHONY: build run run-worker test test-cover lint clean \
+.PHONY: build start run run-worker run-all test test-cover lint clean \
         docker-build docker-up docker-down docker-logs docker-ps \
         dev-deps dev-deps-down smoke migrate-create
 
@@ -9,11 +9,21 @@ API       ?= http://localhost:8080
 build:
 	go build -ldflags="-s -w" -o $(BUILD_DIR)/server ./cmd/server
 
-run:
-	go run ./cmd/server
+## start: the whole app in one command (deps, build, API + worker + dashboard).
+start:
+	./run.sh
 
+## run: API and dashboard only. Pair with run-worker in a second terminal.
+run:
+	go run ./cmd/server --api
+
+## run-worker: the pipeline only.
 run-worker:
 	go run ./cmd/server --worker
+
+## run-all: API + worker in one process, assuming postgres and redis are up.
+run-all:
+	go run ./cmd/server
 
 test:
 	go test ./... -count=1
@@ -48,17 +58,26 @@ docker-logs:
 docker-ps:
 	docker compose ps
 
-## smoke: drive a CSV import end to end and show the scored leads.
+## smoke: scrape Google Maps end to end against a running app, then print the
+## ranked leads. Override with: make smoke CATEGORY=tailor LOCATION=Kochi
+CATEGORY ?= bakery
+LOCATION ?= Kochi
+LIMIT    ?= 10
+
 smoke:
 	@echo "== health =="
 	@curl -sf $(API)/api/v1/health && echo
-	@echo "\n== queue a csv import =="
+	@echo ""
+	@echo "== scraping Google Maps: $(CATEGORY) in $(LOCATION) =="
 	@curl -sf -X POST $(API)/api/v1/scrape \
 		-H 'Content-Type: application/json' \
-		-d '{"source":"csv","file":"sample-leads.csv","category":"cafe"}' && echo
-	@echo "\n== waiting for the worker to drain the pipeline =="
-	@sleep 25
-	@echo "\n== scored leads =="
+		-d '{"source":"google_maps","category":"$(CATEGORY)","location":"$(LOCATION)","limit":$(LIMIT)}' && echo
+	@echo ""
+	@echo "== waiting for the pipeline (the browser scrape takes a few minutes) =="
+	@until [ "$$(curl -sf $(API)/api/v1/ready | sed -E 's/.*\"queue_depth\":([0-9]+).*/\1/')" = "0" ]; do printf '.'; sleep 5; done
+	@echo ""
+	@echo ""
+	@echo "== ranked leads =="
 	@curl -sf $(API)/api/v1/leads
 
 clean:

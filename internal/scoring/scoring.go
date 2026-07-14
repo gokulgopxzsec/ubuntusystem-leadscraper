@@ -15,6 +15,7 @@ const (
 	RuleBrokenWebsite Rule = "broken_website"
 	RuleNotMobile     Rule = "not_mobile_friendly"
 	RuleNoBooking     Rule = "no_booking"
+	RuleSocialOnly    Rule = "social_only"
 )
 
 type RuleDef struct {
@@ -55,6 +56,13 @@ type EvalContext struct {
 	IsReachable      bool
 	IsMobileFriendly bool
 	HasBooking       bool
+
+	// SocialOnly means the only "website" the business has is an Instagram or
+	// Facebook page, or a link-in-bio. It is not a storefront, so HasWebsite
+	// must be false alongside it.
+	SocialOnly bool
+	// SocialPlatform names it, for the pitch.
+	SocialPlatform string
 }
 
 type ScoreResult struct {
@@ -91,10 +99,19 @@ func (r ScoreResult) Priority() string {
 func DefaultRules() []RuleDef {
 	return []RuleDef{
 		{
+			// The best lead there is: actively selling, but only through DMs.
+			// This is the exact problem makeforme was built for, so it outranks
+			// even having no web presence at all.
+			Name: RuleSocialOnly, Weight: 32,
+			Reason:  "Selling through social media with no real storefront. Orders are landing in DMs.",
+			Eval:    func(c *EvalContext) bool { return c.SocialOnly },
+			Applies: func(c *EvalContext) bool { return c.SocialOnly },
+		},
+		{
 			Name: RuleNoWebsite, Weight: 30,
 			Reason:  "No website at all. Nothing to migrate, everything to gain.",
 			Eval:    func(c *EvalContext) bool { return !c.HasWebsite },
-			Applies: func(c *EvalContext) bool { return !c.HasWebsite },
+			Applies: func(c *EvalContext) bool { return !c.HasWebsite && !c.SocialOnly },
 		},
 		{
 			Name: RuleBrokenWebsite, Weight: 25,
@@ -193,9 +210,23 @@ func (e *Engine) Evaluate(ctx *EvalContext) ScoreResult {
 }
 
 // SalesSuggestion turns the highest-weighted gap into a one-line opener.
-func (r ScoreResult) SalesSuggestion(businessName string) string {
+func (r ScoreResult) SalesSuggestion(businessName string, ctx *EvalContext) string {
 	if len(r.Reasons) == 0 {
 		return fmt.Sprintf("%s already has a solid online presence. Low priority.", businessName)
+	}
+
+	// The social-only case gets its own opener: this is the founding story of
+	// makeforme, and the generic "your website is broken" line would be both
+	// wrong and useless in front of them.
+	if ctx != nil && ctx.SocialOnly {
+		platform := ctx.SocialPlatform
+		if platform == "" {
+			platform = "social media"
+		}
+		return fmt.Sprintf(
+			"%s is a top lead. They sell through %s with no real storefront, so every order goes through DMs. "+
+				"Show them a makeforme.in link they can put in their bio today and take payments straight away.",
+			businessName, platform)
 	}
 
 	lead := r.Reasons[0]

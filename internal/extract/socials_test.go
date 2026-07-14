@@ -49,3 +49,39 @@ func TestSocialsDeduplicatesPerPlatform(t *testing.T) {
 		t.Errorf("expected 1 profile after dedup, got %d", len(got))
 	}
 }
+
+func TestSocialOnlyDetectsAStorefrontThatIsNotOne(t *testing.T) {
+	// Google Maps lets a business put anything in its website field, and small
+	// sellers routinely put their Instagram there.
+	socials := []string{
+		"https://instagram.com/beurredevanille",
+		"https://www.facebook.com/bakersnest/",
+		"https://linktr.ee/chaicafe",
+		"https://wa.me/919876543210",
+	}
+	for _, u := range socials {
+		if _, ok := SocialOnly(u); !ok {
+			t.Errorf("SocialOnly(%q) = false, want true: this is not a storefront", u)
+		}
+	}
+
+	realSites := []string{
+		"https://supremebakers.in/",
+		"http://www.jamrolls.com/",
+		"https://chaicafe.in/shop",
+		"",
+	}
+	for _, u := range realSites {
+		if _, ok := SocialOnly(u); ok {
+			t.Errorf("SocialOnly(%q) = true, want false: this IS a real website", u)
+		}
+	}
+}
+
+func TestSocialOnlyNamesThePlatform(t *testing.T) {
+	// The pitch says "they sell through <platform>", so the name has to be right.
+	platform, ok := SocialOnly("https://www.instagram.com/beurredevanille")
+	if !ok || platform != "instagram" {
+		t.Errorf("SocialOnly() = (%q, %v), want (instagram, true)", platform, ok)
+	}
+}

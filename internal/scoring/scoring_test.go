@@ -1,6 +1,9 @@
 package scoring
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestNoWebsiteIsTheStrongestLead(t *testing.T) {
 	e := NewDefaultEngine()
@@ -81,5 +84,55 @@ func TestPercentIsSafeWithNoRules(t *testing.T) {
 	res := ScoreResult{}
 	if got := res.Percent(); got != 0 {
 		t.Errorf("Percent() on an empty result = %d, want 0", got)
+	}
+}
+
+// A bakery selling through Instagram DMs is the single best lead there is: it is
+// trading, and it has no storefront. It must outrank a business with no web
+// presence at all, and must never be scored as though its website were broken.
+func TestSocialOnlyIsTheStrongestLead(t *testing.T) {
+	e := NewDefaultEngine()
+
+	social := e.Evaluate(&EvalContext{
+		SocialOnly: true, SocialPlatform: "instagram",
+		HasPhone: true, HasSocialLinks: true,
+	})
+
+	if social.Breakdown[RuleSocialOnly] == 0 {
+		t.Error("the social_only rule should have fired")
+	}
+	if social.Priority() != "high" {
+		t.Errorf("priority = %q (%d%%), want high", social.Priority(), social.Percent())
+	}
+
+	// Website rules must not fire: they have no website to be broken. This is
+	// the actual bug — a bakery whose "website" was a Facebook page was being
+	// reported as having a site that "does not load".
+	for _, r := range []Rule{RuleBrokenWebsite, RuleNoWebsite, RuleSSLMissing, RuleNotMobile} {
+		if social.Breakdown[r] != 0 {
+			t.Errorf("%s fired on a social-only business; it has no website at all", r)
+		}
+	}
+
+	// Compare like for like. Both have a social presence and a phone; the only
+	// difference is that one is actively selling on Instagram. Holding the other
+	// signals equal is the only way the percentages share a denominator.
+	noWeb := e.Evaluate(&EvalContext{HasPhone: true, HasSocialLinks: true})
+
+	if social.Percent() <= noWeb.Percent() {
+		t.Errorf("a business selling on Instagram (%d%%) should outrank one that is simply absent (%d%%)",
+			social.Percent(), noWeb.Percent())
+	}
+}
+
+func TestSocialOnlySuggestionNamesThePlatform(t *testing.T) {
+	ctx := &EvalContext{SocialOnly: true, SocialPlatform: "instagram", HasPhone: true}
+	got := NewDefaultEngine().Evaluate(ctx).SalesSuggestion("Bake Saga", ctx)
+
+	if !strings.Contains(got, "instagram") {
+		t.Errorf("the pitch should name the platform, got: %s", got)
+	}
+	if strings.Contains(strings.ToLower(got), "does not load") {
+		t.Errorf("must not tell them their website is broken; they have no website: %s", got)
 	}
 }

@@ -15,13 +15,20 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /bin/server ./cmd/serv
 
 FROM alpine:3.20
 
-RUN apk add --no-cache ca-certificates tzdata
+# docker-cli lets the worker launch gosom/google-maps-scraper as a sibling
+# container. It is the client only; the daemon is the host's, reached through the
+# socket that docker-compose mounts.
+RUN apk add --no-cache ca-certificates tzdata docker-cli
 
 RUN adduser -D -u 1001 app
 
 COPY --from=builder /bin/server /app/server
 # Migrations are read from disk at startup, so they must be in the image.
 COPY --from=builder /src/migrations /app/migrations
+
+# The Maps scraper writes its query and result files here, and the host bind
+# mounts the same directory so the sibling container can see them.
+RUN mkdir -p /app/data/gmaps && chown -R app:app /app/data
 
 WORKDIR /app
 USER app

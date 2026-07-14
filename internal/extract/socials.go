@@ -99,6 +99,51 @@ func SocialsFromHTML(businessID, html string) []*domain.SocialProfile {
 	return Socials(businessID, socialURLRe.FindAllString(html, -1))
 }
 
+// linkInBioHosts are the other things that turn up in a business's "website"
+// slot: a link aggregator is not a storefront either.
+var linkInBioHosts = map[string]bool{
+	"linktr.ee":    true,
+	"bio.link":     true,
+	"beacons.ai":   true,
+	"linkin.bio":   true,
+	"lnk.bio":      true,
+	"campsite.bio": true,
+	"solo.to":      true,
+	"carrd.co":     true,
+	"about.me":     true,
+	"tap.bio":      true,
+}
+
+// SocialOnly reports whether a business's "website" is really just a social
+// profile or a link-in-bio page.
+//
+// Google Maps lets a business put anything in its website field, and a great
+// many small sellers put their Instagram there. Treating that as a website is
+// wrong twice over: the crawler gets blocked by Facebook and reports the site as
+// "down", and the business gets pitched as though it had a broken storefront.
+// In truth it has no storefront at all, which makes it the strongest kind of
+// lead — orders are being taken in DMs.
+func SocialOnly(rawURL string) (platform string, ok bool) {
+	if strings.TrimSpace(rawURL) == "" {
+		return "", false
+	}
+
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", false
+	}
+
+	host := canonicalHost(u.Host)
+
+	if p, found := socialHosts[host]; found {
+		return p, true
+	}
+	if linkInBioHosts[host] {
+		return "link-in-bio", true
+	}
+	return "", false
+}
+
 func canonicalHost(host string) string {
 	host = strings.ToLower(host)
 	if i := strings.IndexByte(host, ':'); i >= 0 {

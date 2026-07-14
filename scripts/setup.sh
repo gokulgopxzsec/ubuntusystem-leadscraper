@@ -17,6 +17,12 @@ readonly GO_MIN_VERSION="1.26.4"
 readonly GO_VERSION="1.26.4"
 readonly GO_ROOT="/usr/local/go"
 
+# gosom/google-maps-scraper: scrapes Google Maps with a headless Chromium, no API key.
+# The -rod tag, not :latest. Every Playwright-based tag pins a driver version
+# that Microsoft's retired CDN no longer serves, so those images die on startup
+# with "could not install driver ... 404". The -rod build needs no driver.
+readonly GMAPS_IMAGE="gosom/google-maps-scraper:latest-rod"
+
 readonly REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 readonly RED=$'\e[31m' GREEN=$'\e[32m' YELLOW=$'\e[33m' BLUE=$'\e[34m' DIM=$'\e[2m' RESET=$'\e[0m'
@@ -87,6 +93,12 @@ detect() {
     printf '  %s✓%s compose      %s %s(will keep)%s\n' "$GREEN" "$RESET" "$compose_v" "$DIM" "$RESET"
   else
     printf '  %s✗%s compose      %snot installed, will install the plugin%s\n' "$YELLOW" "$RESET" "$DIM" "$RESET"
+  fi
+
+  if docker image inspect "$GMAPS_IMAGE" >/dev/null 2>&1; then
+    printf '  %s✓%s maps-scraper %spulled (will keep)%s\n' "$GREEN" "$RESET" "$DIM" "$RESET"
+  else
+    printf '  %s✗%s maps-scraper %swill pull %s%s\n' "$YELLOW" "$RESET" "$DIM" "$GMAPS_IMAGE" "$RESET"
   fi
 
   if [[ -f "${REPO_DIR}/.env" ]]; then
@@ -224,6 +236,41 @@ install_docker() {
 
 # ---------------------------------------------------------------- project
 
+# google-maps-scraper is gosom/google-maps-scraper. It drives a headless
+# Chromium, so we pull the published image rather than building it and letting
+# Playwright download a browser toolchain onto this machine.
+install_gmaps() {
+  step "google-maps-scraper (gosom)"
+
+  if ! docker info >/dev/null 2>&1; then
+    warn "skipping: the Docker daemon is not reachable from this shell yet"
+    warn "after re-login, run: docker pull ${GMAPS_IMAGE}"
+    return
+  fi
+
+  if docker image inspect "$GMAPS_IMAGE" >/dev/null 2>&1; then
+    ok "${GMAPS_IMAGE} already pulled"
+    return
+  fi
+
+  printf '  %spulling %s (this includes Chromium, so it is a large image)...%s\n' \
+    "$DIM" "$GMAPS_IMAGE" "$RESET"
+
+  if docker pull "$GMAPS_IMAGE" >/dev/null 2>&1; then
+    ok "pulled ${GMAPS_IMAGE}"
+  else
+    warn "could not pull ${GMAPS_IMAGE}; the google_maps source will be disabled"
+    warn "retry later with: docker pull ${GMAPS_IMAGE}"
+  fi
+
+  # The headless browser is the heaviest thing this project runs.
+  local mem_mb
+  mem_mb="$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo)"
+  if (( mem_mb < 8192 )); then
+    warn "with ${mem_mb} MB RAM, keep GMAPS_CONCURRENCY=1 and close your browser while scraping"
+  fi
+}
+
 setup_env() {
   step "Configuration"
 
@@ -315,6 +362,7 @@ main() {
   detect
   install_go
   install_docker
+  install_gmaps
   setup_env
   start_deps
   build_and_test

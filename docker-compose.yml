@@ -91,11 +91,27 @@ services:
     environment:
       <<: *app-env
       AUTO_MIGRATE: "false"
-      # Two cores, and the work is network-bound rather than CPU-bound.
+      # Two cores, and the crawl work is network-bound rather than CPU-bound.
       WORKER_CONCURRENCY: "4"
       CRAWLER_STORE_HTML: "false"
+      # A Maps scrape drives a headless browser for minutes; the 2m job timeout
+      # would kill it before it produced a row.
+      WORKER_COLLECT_TIMEOUT: "30m"
+
+      # The Maps scrape runs as a sibling container, which needs three things:
+      #  1. the Docker socket, mounted below;
+      #  2. a work directory that exists on BOTH sides, bind-mounted below;
+      #  3. the host's name for it, because `docker run -v` is resolved by the
+      #     daemon on the host, not inside this container.
+      GMAPS_WORK_DIR: /app/data/gmaps
+      GMAPS_HOST_WORK_DIR: ${PWD}/data/gmaps
     volumes:
-      - ./data:/app/data:ro
+      - ./data:/app/data
+      # Lets the worker launch the scraper as a sibling container. This grants
+      # the worker control of the host's Docker daemon, which is effectively root
+      # on the host: fine for a single-tenant box you own, not for shared infra.
+      # Run the worker natively instead (make run-worker) if that matters to you.
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       postgres:
         condition: service_healthy

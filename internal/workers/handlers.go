@@ -140,6 +140,28 @@ func (w *Worker) crawlWebsite(ctx context.Context, job *queue.Job) error {
 		return errors.New("website_crawl needs a business_id and a url")
 	}
 
+	// Google Maps lets a business put anything in its website field, and small
+	// sellers routinely put their Instagram. Crawling that would get us blocked
+	// by Meta and we would then report the business's site as "down". Record it
+	// as the social profile it is and score it as having no storefront.
+	if platform, ok := extract.SocialOnly(job.URL); ok {
+		w.log.Info("business has no storefront, only a social profile",
+			"business_id", job.BusinessID, "platform", platform, "url", job.URL)
+
+		err := w.deps.Socials.BulkUpsert(ctx, []*domain.SocialProfile{{
+			BusinessID: job.BusinessID,
+			Platform:   platform,
+			URL:        job.URL,
+		}})
+		if err != nil {
+			return fmt.Errorf("store social profile: %w", err)
+		}
+
+		return w.deps.Queue.Enqueue(ctx, queue.Job{
+			Type: queue.JobRuleScoring, BusinessID: job.BusinessID,
+		})
+	}
+
 	res, err := w.deps.Crawler.Crawl(ctx, job.URL)
 	if err != nil {
 		return fmt.Errorf("crawl %s: %w", job.URL, err)
@@ -429,9 +451,17 @@ func (w *Worker) ruleScoring(ctx context.Context, job *queue.Job) error {
 		HasPhone:   business.Phone != "",
 	}
 
+	// An Instagram page is not a storefront. Scoring it as a website would rank
+	// the best lead we have as a mediocre one.
+	if platform, ok := extract.SocialOnly(business.Website); ok {
+		evalCtx.SocialOnly = true
+		evalCtx.SocialPlatform = platform
+		evalCtx.HasWebsite = false
+	}
+
 	// A website row exists only if a crawl ran, so its absence is not an error.
 	site, err := w.deps.Websites.GetByBusinessID(ctx, job.BusinessID)
-	if err == nil {
+	if err == nil && !evalCtx.SocialOnly {
 		evalCtx.IsReachable = site.StatusCode > 0 && site.StatusCode < 400
 		evalCtx.HasSSL = site.HasSSL
 		evalCtx.HasBooking = site.HasBooking
@@ -475,7 +505,7 @@ func (w *Worker) ruleScoring(ctx context.Context, job *queue.Job) error {
 		score.TotalScore = (result.Percent()*7 + score.AIScore*3) / 10
 	}
 
-	score.SalesSuggestion = result.SalesSuggestion(business.Name)
+	score.SalesSuggestion = result.SalesSuggestion(business.Name, evalCtx)
 
 	if err := w.deps.Scores.Create(ctx, score); err != nil {
 		return fmt.Errorf("store lead score: %w", err)

@@ -23,9 +23,11 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/makeforme/leadscraper/internal/domain"
 	"github.com/makeforme/leadscraper/internal/ports"
@@ -49,17 +51,41 @@ func (a *Adapter) Available() error {
 	switch a.cfg.Mode {
 	case "docker":
 		if _, err := exec.LookPath("docker"); err != nil {
-			return errors.New("GMAPS_MODE=docker but docker is not on PATH")
+			return errors.New("GMAPS_MODE=docker but the docker CLI is not on PATH")
 		}
+
+		// Having the client is not the same as being able to reach the daemon.
+		// The usual cause is this process running inside a container without
+		// /var/run/docker.sock, or without permission on it — and finding that
+		// out now beats failing every scrape job later.
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		if out, err := exec.CommandContext(ctx, "docker", "info", "--format", "{{.ServerVersion}}").CombinedOutput(); err != nil {
+			return fmt.Errorf("cannot reach the Docker daemon (%s). "+
+				"If the worker is running in a container, mount /var/run/docker.sock and make sure "+
+				"the container user can read it; otherwise run the worker natively (make run-worker)",
+				strings.TrimSpace(lastLine(string(out))))
+		}
+
 	case "binary":
 		if _, err := exec.LookPath(a.cfg.Binary); err != nil {
-			return fmt.Errorf("google-maps-scraper binary %q not found on PATH; "+
+			return fmt.Errorf("google-maps-scraper binary %q is not on PATH; "+
 				"install it or set GMAPS_MODE=docker", a.cfg.Binary)
 		}
+
 	default:
 		return fmt.Errorf("unsupported GMAPS_MODE %q (want binary or docker)", a.cfg.Mode)
 	}
 	return nil
+}
+
+func lastLine(s string) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	if len(lines) == 0 {
+		return ""
+	}
+	return lines[len(lines)-1]
 }
 
 func (a *Adapter) Scrape(ctx context.Context, params ports.ScrapeParams, results chan<- ports.BusinessResult) error {
@@ -141,12 +167,39 @@ func (a *Adapter) run(ctx context.Context, workDir, queryFile, outFile string, l
 		if ctx.Err() == context.DeadlineExceeded {
 			return fmt.Errorf("google-maps-scraper timed out after %s "+
 				"(raise GMAPS_TIMEOUT, or lower GMAPS_DEPTH): %s",
-				a.cfg.Timeout, strings.Join(tail, " | "))
+				a.cfg.Timeout, lastLines(tail))
 		}
-		return fmt.Errorf("google-maps-scraper failed: %w: %s", err, strings.Join(tail, " | "))
+
+		// The single most likely failure, and the message gosom emits for it is
+		// impenetrable. Say what to actually do about it.
+		if joined := strings.Join(tail, " "); strings.Contains(joined, "could not install driver") {
+			return fmt.Errorf("google-maps-scraper could not start its browser: "+
+				"the Playwright-based images pin a driver version that Microsoft's "+
+				"retired CDN no longer serves. Use the go-rod build instead: "+
+				"GMAPS_DOCKER_IMAGE=gosom/google-maps-scraper:latest-rod (currently %q)",
+				a.cfg.DockerImage)
+		}
+
+		return fmt.Errorf("google-maps-scraper failed: %w: %s", err, lastLines(tail))
 	}
 
 	return nil
+}
+
+// lastLines trims gosom's stderr down to something a log line can carry. Its
+// banner alone is eight lines of box-drawing characters.
+func lastLines(tail []string) string {
+	var kept []string
+	for _, line := range tail {
+		if strings.ContainsAny(line, "╔╗╚╝║═") {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	if len(kept) > 3 {
+		kept = kept[len(kept)-3:]
+	}
+	return strings.Join(kept, " | ")
 }
 
 func (a *Adapter) command(ctx context.Context, workDir, queryFile, outFile string, limit int) *exec.Cmd {
@@ -158,12 +211,12 @@ func (a *Adapter) command(ctx context.Context, workDir, queryFile, outFile strin
 	}
 
 	if a.cfg.Mode == "docker" {
-		// The named volume caches the Playwright browser download; without it
-		// every run re-downloads Chromium.
+		// Deliberately no `-v gmaps-playwright-cache:/opt`, which gosom's README
+		// suggests: mounting a volume over /opt hides the browser that is already
+		// baked into the image, and the container then fails to start.
 		args := []string{
 			"run", "--rm",
-			"-v", "gmaps-playwright-cache:/opt",
-			"-v", workDir + ":/work",
+			"-v", a.hostPath(workDir) + ":/work",
 			a.cfg.DockerImage,
 			"-input", "/work/queries.txt",
 			"-results", "/work/results.csv",
@@ -178,6 +231,29 @@ func (a *Adapter) command(ctx context.Context, workDir, queryFile, outFile strin
 	cmd := exec.CommandContext(ctx, a.cfg.Binary, args...)
 	cmd.Dir = workDir
 	return cmd
+}
+
+// hostPath translates a path we can see into the path the Docker daemon can see.
+//
+// `docker run -v X:/work` is resolved by the daemon on the host, not by us. When
+// the worker itself runs in a container, our /app/data/gmaps/gmaps-123 means
+// nothing to the host, and the scraper would launch against an empty directory
+// and find no query file. GMAPS_HOST_WORK_DIR names the same directory as the
+// host sees it, so we can rewrite the prefix.
+func (a *Adapter) hostPath(workDir string) string {
+	if a.cfg.HostWorkDir == "" || a.cfg.WorkDir == "" {
+		return workDir
+	}
+
+	rel, err := filepath.Rel(a.cfg.WorkDir, workDir)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		// The temp dir is not under WorkDir after all; a rewritten path would be
+		// worse than the original.
+		return workDir
+	}
+
+	// The host is Linux even when this code is not, so join with forward slashes.
+	return path.Join(a.cfg.HostWorkDir, filepath.ToSlash(rel))
 }
 
 func (a *Adapter) flags(depth int) []string {

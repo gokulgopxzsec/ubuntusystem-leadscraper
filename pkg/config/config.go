@@ -90,9 +90,14 @@ type SourcesConfig struct {
 type GmapsConfig struct {
 	Enabled bool `env:"GMAPS_ENABLED, default=true"`
 	// binary (a google-maps-scraper on PATH) or docker (the published image).
-	Mode        string `env:"GMAPS_MODE, default=docker"`
-	Binary      string `env:"GMAPS_BINARY, default=google-maps-scraper"`
-	DockerImage string `env:"GMAPS_DOCKER_IMAGE, default=gosom/google-maps-scraper:latest"`
+	Mode   string `env:"GMAPS_MODE, default=docker"`
+	Binary string `env:"GMAPS_BINARY, default=google-maps-scraper"`
+	// The -rod tag, not :latest. Every Playwright-based tag is currently broken:
+	// they pin a driver version that only existed on playwright.azureedge.net,
+	// which Microsoft has retired, so the container dies on startup with
+	// "could not install driver ... 404". The -rod build drives Chromium over
+	// CDP with go-rod and downloads no driver, so it just works.
+	DockerImage string `env:"GMAPS_DOCKER_IMAGE, default=gosom/google-maps-scraper:latest-rod"`
 
 	// Each unit of concurrency is a headless Chromium. gosom's own Kubernetes
 	// example asks for 512Mi per instance, so on a 2-core / 7GB box this stays
@@ -117,6 +122,16 @@ type GmapsConfig struct {
 	// Where the scraper's temporary query and result files go. Empty means the
 	// system temp directory.
 	WorkDir string `env:"GMAPS_WORK_DIR"`
+
+	// HostWorkDir is what WorkDir is called on the Docker *host*.
+	//
+	// It only matters when the worker itself runs in a container: `docker run -v
+	// <path>:/work` is interpreted by the daemon on the host, so passing our own
+	// in-container path would bind-mount a directory that does not exist there,
+	// and the scraper would start up and find no query file. Setting this makes
+	// us translate the path before handing it to docker. Leave it empty when the
+	// worker runs natively.
+	HostWorkDir string `env:"GMAPS_HOST_WORK_DIR"`
 }
 
 func Load(ctx context.Context) (*Config, error) {
