@@ -10,8 +10,10 @@
 
 set -euo pipefail
 
-# Go's own version, not Ubuntu's. `apt install golang` ships a release that is
-# older than the `go` directive in go.mod, and the build would fail.
+# The minimum Go the module needs (the `go` directive in go.mod). Anything at
+# or above this is fine and is left alone; `apt install golang` ships older.
+readonly GO_MIN_VERSION="1.26.4"
+# What we install if Go is missing or too old.
 readonly GO_VERSION="1.26.4"
 readonly GO_ROOT="/usr/local/go"
 
@@ -59,18 +61,60 @@ preflight() {
   fi
 }
 
+# detect reports what is already present before anything is installed, so it is
+# obvious what this script is about to touch and what it will leave alone.
+detect() {
+  step "What is already installed"
+
+  local go_v docker_v compose_v
+
+  go_v="$(go_version)"
+  if [[ -z "$go_v" ]]; then
+    printf '  %s✗%s go           %snot installed, will install go%s%s\n' "$YELLOW" "$RESET" "$DIM" "$GO_VERSION" "$RESET"
+  elif version_ge "$go_v" "$GO_MIN_VERSION"; then
+    printf '  %s✓%s go           %s %s(>= %s, will keep)%s\n' "$GREEN" "$RESET" "$go_v" "$DIM" "$GO_MIN_VERSION" "$RESET"
+  else
+    printf '  %s✗%s go           %s %s(too old, need >= %s, will upgrade)%s\n' "$YELLOW" "$RESET" "$go_v" "$DIM" "$GO_MIN_VERSION" "$RESET"
+  fi
+
+  if docker_v="$(docker --version 2>/dev/null)"; then
+    printf '  %s✓%s docker       %s %s(will keep)%s\n' "$GREEN" "$RESET" "${docker_v#Docker version }" "$DIM" "$RESET"
+  else
+    printf '  %s✗%s docker       %snot installed, will install%s\n' "$YELLOW" "$RESET" "$DIM" "$RESET"
+  fi
+
+  if compose_v="$(docker compose version --short 2>/dev/null)"; then
+    printf '  %s✓%s compose      %s %s(will keep)%s\n' "$GREEN" "$RESET" "$compose_v" "$DIM" "$RESET"
+  else
+    printf '  %s✗%s compose      %snot installed, will install the plugin%s\n' "$YELLOW" "$RESET" "$DIM" "$RESET"
+  fi
+
+  if [[ -f "${REPO_DIR}/.env" ]]; then
+    printf '  %s✓%s .env         %spresent (will not overwrite)%s\n' "$GREEN" "$RESET" "$DIM" "$RESET"
+  else
+    printf '  %s✗%s .env         %swill create from .env.example%s\n' "$YELLOW" "$RESET" "$DIM" "$RESET"
+  fi
+
+  printf '\n  %sNothing marked "will keep" is touched.%s\n' "$DIM" "$RESET"
+}
+
 # ---------------------------------------------------------------- go
 
 install_go() {
-  step "Go ${GO_VERSION}"
+  step "Go"
 
-  if have_go_version; then
-    ok "go ${GO_VERSION} already installed"
+  local current
+  current="$(go_version)"
+
+  if [[ -n "$current" ]] && version_ge "$current" "$GO_MIN_VERSION"; then
+    ok "go${current} already installed and new enough (need >= ${GO_MIN_VERSION}); leaving it alone"
     return
   fi
 
-  if command -v go >/dev/null; then
-    warn "found $(go version | awk '{print $3}'), replacing it with go${GO_VERSION}"
+  if [[ -n "$current" ]]; then
+    warn "go${current} is older than the required go${GO_MIN_VERSION}; upgrading to go${GO_VERSION}"
+  else
+    printf '  %snot installed%s\n' "$DIM" "$RESET"
   fi
 
   local arch tarball
@@ -92,14 +136,25 @@ install_go() {
   rm -f "/tmp/${tarball}"
 
   add_go_to_path
-  export PATH="$PATH:${GO_ROOT}/bin"
+  export PATH="${GO_ROOT}/bin:$PATH"
+  hash -r
 
-  have_go_version || die "Go installed but 'go version' does not report ${GO_VERSION}"
-  ok "installed $(go version)"
+  version_ge "$(go_version)" "$GO_MIN_VERSION" \
+    || die "Go was installed but 'go version' still reports $(go_version)"
+  ok "installed $(go version | awk '{print $3}')"
 }
 
-have_go_version() {
-  command -v go >/dev/null && [[ "$(go env GOVERSION 2>/dev/null)" == "go${GO_VERSION}" ]]
+# go_version prints the bare version ("1.26.4"), or nothing if Go is absent.
+go_version() {
+  command -v go >/dev/null || return 0
+  go env GOVERSION 2>/dev/null | sed 's/^go//'
+}
+
+# version_ge is a numeric compare, so 1.26.4 correctly beats 1.9.0 (which a
+# plain string comparison gets backwards).
+version_ge() {
+  [[ -n "$1" ]] || return 1
+  [[ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" == "$2" ]]
 }
 
 add_go_to_path() {
@@ -257,6 +312,7 @@ main() {
   printf '%sleadscraper setup%s\n' "$BLUE" "$RESET"
 
   preflight
+  detect
   install_go
   install_docker
   setup_env

@@ -10,6 +10,7 @@ import (
 
 	"github.com/makeforme/leadscraper/internal/adapters/api/handler"
 	"github.com/makeforme/leadscraper/internal/adapters/api/middleware"
+	"github.com/makeforme/leadscraper/internal/adapters/api/web"
 	"github.com/makeforme/leadscraper/internal/ports"
 	"github.com/makeforme/leadscraper/internal/queue"
 )
@@ -72,6 +73,10 @@ func NewRouter(deps RouterDeps) *chi.Mux {
 			r.Get("/scrape/{id}", scrape.Get)
 		})
 	})
+
+	// The dashboard is embedded in the binary and served from the root. It is a
+	// client of the same /api/v1 endpoints as any other consumer.
+	r.Handle("/", web.Handler())
 
 	r.NotFound(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

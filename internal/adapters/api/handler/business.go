@@ -67,9 +67,14 @@ func (h *BusinessHandler) List(w http.ResponseWriter, r *http.Request) {
 
 // businessDetail is the whole picture of one lead: everything the pipeline
 // gathered, in the single response a salesperson actually wants.
+//
+// The crawled site is called "site", not "website", deliberately. domain.Business
+// already has a `website` string (the URL), and an embedded struct loses a name
+// collision against an outer field — so tagging this one `website` silently
+// dropped the business's own URL from the response.
 type businessDetail struct {
 	*domain.Business
-	Website  *domain.Website         `json:"website,omitempty"`
+	Site     *domain.Website         `json:"site,omitempty"`
 	Contacts []*domain.Contact       `json:"contacts"`
 	Socials  []*domain.SocialProfile `json:"socials"`
 	Score    *domain.LeadScore       `json:"score,omitempty"`
@@ -95,7 +100,7 @@ func (h *BusinessHandler) Get(w http.ResponseWriter, r *http.Request) {
 	// The related records are all optional: a business that has not been
 	// crawled yet simply has none of them, which is not an error.
 	if site, err := h.websites.GetByBusinessID(ctx, id); err == nil {
-		detail.Website = site
+		detail.Site = site
 	}
 	if contacts, err := h.contacts.GetByBusinessID(ctx, id); err == nil && contacts != nil {
 		detail.Contacts = contacts

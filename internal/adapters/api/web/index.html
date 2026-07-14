@@ -1,0 +1,450 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>leadscraper</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --panel-2: #1e222b;
+    --line: #2a2f3a;
+    --text: #e6e8ec;
+    --muted: #8b93a1;
+    --accent: #5b8cff;
+    --high: #ff6b5b;
+    --med: #f5a623;
+    --low: #5f6b7a;
+    --ok: #3ecf8e;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f6f7f9; --panel: #fff; --panel-2: #f0f2f5; --line: #dfe3e8;
+      --text: #14171f; --muted: #667085; --low: #98a2b3;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    padding: 14px 20px; border-bottom: 1px solid var(--line); background: var(--panel);
+    position: sticky; top: 0; z-index: 10;
+  }
+  h1 { margin: 0; font-size: 16px; font-weight: 650; letter-spacing: -0.01em; }
+  h1 span { color: var(--muted); font-weight: 400; }
+  .grow { flex: 1; }
+  .status { display: flex; gap: 14px; align-items: center; font-size: 12px; color: var(--muted); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--low); display: inline-block; margin-right: 5px; }
+  .dot.ok { background: var(--ok); }
+  .dot.bad { background: var(--high); }
+
+  button {
+    background: var(--accent); color: #fff; border: 0; border-radius: 6px;
+    padding: 8px 14px; font: inherit; font-weight: 550; cursor: pointer;
+  }
+  button:hover { filter: brightness(1.1); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.ghost { background: transparent; color: var(--muted); border: 1px solid var(--line); }
+
+  main { padding: 20px; max-width: 1100px; margin: 0 auto; }
+
+  .toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+  input, select {
+    background: var(--panel); color: var(--text); border: 1px solid var(--line);
+    border-radius: 6px; padding: 8px 10px; font: inherit; min-width: 0;
+  }
+  input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 16px; margin-bottom: 10px; cursor: pointer;
+  }
+  .card:hover { border-color: var(--accent); }
+  .card-top { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .name { font-weight: 650; font-size: 15px; }
+  .meta { color: var(--muted); font-size: 12px; }
+
+  .badge {
+    font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+    padding: 3px 8px; border-radius: 5px; color: #fff; white-space: nowrap;
+  }
+  .badge.high { background: var(--high); }
+  .badge.medium { background: var(--med); }
+  .badge.low { background: var(--low); }
+  .score { font-variant-numeric: tabular-nums; font-weight: 700; font-size: 15px; }
+
+  .pitch { margin-top: 8px; color: var(--text); opacity: .9; }
+  .gaps { margin-top: 10px; display: flex; gap: 6px; flex-wrap: wrap; }
+  .gap {
+    font-size: 11px; background: var(--panel-2); border: 1px solid var(--line);
+    color: var(--muted); padding: 2px 7px; border-radius: 20px;
+  }
+
+  dialog {
+    background: var(--panel); color: var(--text); border: 1px solid var(--line);
+    border-radius: 12px; padding: 0; max-width: 620px; width: calc(100% - 32px);
+  }
+  dialog::backdrop { background: rgba(0,0,0,.55); }
+  .dlg-head { padding: 16px 20px; border-bottom: 1px solid var(--line); display: flex; gap: 12px; align-items: center; }
+  .dlg-body { padding: 20px; max-height: 65vh; overflow: auto; }
+  .row { display: flex; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--line); }
+  .row:last-child { border-bottom: 0; }
+  .row dt { color: var(--muted); width: 130px; flex-shrink: 0; margin: 0; }
+  .row dd { margin: 0; word-break: break-word; }
+  h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 18px 0 6px; }
+  a { color: var(--accent); }
+  code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+
+  .empty { text-align: center; padding: 60px 20px; color: var(--muted); }
+  .empty h2 { font-size: 16px; margin: 0 0 6px; color: var(--text); }
+  .toast {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: var(--panel-2); border: 1px solid var(--line); color: var(--text);
+    padding: 10px 16px; border-radius: 8px; opacity: 0; transition: opacity .2s;
+    pointer-events: none; z-index: 50;
+  }
+  .toast.show { opacity: 1; }
+  .toast.err { border-color: var(--high); }
+  .spin { display: inline-block; animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>leadscraper <span id="ver"></span></h1>
+  <div class="grow"></div>
+  <div class="status">
+    <span><span class="dot" id="dot-db"></span>postgres</span>
+    <span><span class="dot" id="dot-redis"></span>redis</span>
+    <span id="queue">queue 0</span>
+  </div>
+  <button id="btn-scrape">Run scrape</button>
+</header>
+
+<main>
+  <div class="toolbar">
+    <input id="q" placeholder="Search by name..." style="flex:1">
+    <select id="f-priority">
+      <option value="">All priorities</option>
+      <option value="high">High only</option>
+      <option value="medium">Medium only</option>
+    </select>
+    <select id="f-website">
+      <option value="">Website: any</option>
+      <option value="false">No website</option>
+      <option value="true">Has website</option>
+    </select>
+    <button class="ghost" id="btn-refresh">Refresh</button>
+  </div>
+
+  <div id="list"></div>
+</main>
+
+<dialog id="detail">
+  <div class="dlg-head">
+    <strong id="d-name" class="grow"></strong>
+    <button class="ghost" onclick="detail.close()">Close</button>
+  </div>
+  <div class="dlg-body" id="d-body"></div>
+</dialog>
+
+<dialog id="scrape">
+  <div class="dlg-head"><strong class="grow">Run a scrape</strong></div>
+  <div class="dlg-body">
+    <div class="row"><dt>Source</dt><dd><select id="s-source"></select></dd></div>
+    <div class="row"><dt>Category</dt><dd><input id="s-category" placeholder="bakery"></dd></div>
+    <div class="row"><dt>Location</dt><dd><input id="s-location" placeholder="Kochi"></dd></div>
+    <div class="row" id="s-file-row"><dt>CSV file</dt><dd><input id="s-file" value="sample-leads.csv"></dd></div>
+    <div class="row"><dt>Limit</dt><dd><input id="s-limit" type="number" value="60"></dd></div>
+    <p class="meta" id="s-hint"></p>
+    <div style="display:flex;gap:8px;margin-top:14px">
+      <button id="s-go">Start</button>
+      <button class="ghost" onclick="scrape.close()">Cancel</button>
+    </div>
+  </div>
+</dialog>
+
+<div class="toast" id="toast"></div>
+
+<script>
+'use strict';
+
+const $ = (id) => document.getElementById(id);
+
+// The API key is optional: when API_KEY is unset server-side the endpoints are
+// open. If we ever get a 401 we prompt once and remember it.
+let apiKey = localStorage.getItem('leadscraper_key') || '';
+
+async function api(path, opts = {}) {
+  const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
+  if (apiKey) headers['X-API-Key'] = apiKey;
+
+  const res = await fetch('/api/v1' + path, { ...opts, headers });
+
+  if (res.status === 401) {
+    const key = prompt('This API requires a key (API_KEY in .env):');
+    if (key) {
+      apiKey = key;
+      localStorage.setItem('leadscraper_key', key);
+      return api(path, opts);
+    }
+    throw new Error('unauthorized');
+  }
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || ('HTTP ' + res.status));
+  }
+  if (res.status === 204) return null;
+  return res.json();
+}
+
+function toast(msg, isError) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.className = 'toast show' + (isError ? ' err' : '');
+  setTimeout(() => { t.className = 'toast'; }, 3500);
+}
+
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
+  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+// ---------------------------------------------------------------- health
+
+async function poll() {
+  try {
+    const r = await api('/ready');
+    $('ver').textContent = 'v' + r.version;
+    $('dot-db').className = 'dot ' + (r.checks.postgres === 'ok' ? 'ok' : 'bad');
+    $('dot-redis').className = 'dot ' + (r.checks.redis === 'ok' ? 'ok' : 'bad');
+
+    const depth = r.queue_depth || 0;
+    $('queue').innerHTML = depth > 0
+      ? '<span class="spin">&#9696;</span> queue ' + depth
+      : 'queue 0' + (r.dead_letter_depth ? ' &middot; ' + r.dead_letter_depth + ' dead' : '');
+
+    // While the worker is chewing through jobs, keep the list fresh so leads
+    // appear as they are scored.
+    if (depth > 0) setTimeout(load, 2000);
+  } catch (e) {
+    $('dot-db').className = 'dot bad';
+    $('dot-redis').className = 'dot bad';
+  }
+}
+
+// ---------------------------------------------------------------- leads
+
+let leads = [];
+
+async function load() {
+  try {
+    const r = await api('/leads?limit=200');
+    leads = r.data || [];
+    render();
+  } catch (e) {
+    toast('Could not load leads: ' + e.message, true);
+  }
+}
+
+function render() {
+  const q = $('q').value.trim().toLowerCase();
+  const fp = $('f-priority').value;
+  const fw = $('f-website').value;
+
+  const rows = leads.filter((l) => {
+    const b = l.business || {};
+    if (q && !(b.name || '').toLowerCase().includes(q)) return false;
+    if (fp && l.priority !== fp) return false;
+    if (fw === 'true' && !b.website) return false;
+    if (fw === 'false' && b.website) return false;
+    return true;
+  });
+
+  if (!rows.length) {
+    $('list').innerHTML = leads.length
+      ? '<div class="empty"><h2>No leads match that filter</h2></div>'
+      : '<div class="empty"><h2>No leads yet</h2>'
+        + '<p>Hit <b>Run scrape</b> to import <code>sample-leads.csv</code> and see the pipeline work.</p></div>';
+    return;
+  }
+
+  $('list').innerHTML = rows.map((l) => {
+    const b = l.business || {};
+    // Only the gaps that actually fired are worth showing; a zero is noise.
+    const gaps = Object.entries(l.breakdown || {})
+      .filter(([, v]) => v > 0)
+      .sort((a, c) => c[1] - a[1])
+      .map(([k, v]) => '<span class="gap">' + esc(k.replace(/_/g, ' ')) + ' +' + v + '</span>')
+      .join('');
+
+    return `
+      <div class="card" data-id="${esc(b.id)}">
+        <div class="card-top">
+          <span class="badge ${esc(l.priority)}">${esc(l.priority)}</span>
+          <span class="score">${l.total_score}</span>
+          <span class="name">${esc(b.name)}</span>
+          <span class="meta">${esc(b.category || '')}</span>
+          <div class="grow"></div>
+          <span class="meta">${b.website ? esc(b.website) : 'no website'}</span>
+        </div>
+        <div class="pitch">${esc(l.sales_suggestion)}</div>
+        <div class="gaps">${gaps}</div>
+      </div>`;
+  }).join('');
+
+  document.querySelectorAll('.card').forEach((c) =>
+    c.onclick = () => showDetail(c.dataset.id));
+}
+
+// ---------------------------------------------------------------- detail
+
+async function showDetail(id) {
+  $('d-name').textContent = 'Loading...';
+  $('d-body').innerHTML = '';
+  $('detail').showModal();
+
+  try {
+    const b = await api('/businesses/' + id);
+    $('d-name').textContent = b.name;
+
+    const row = (k, v) => v ? `<div class="row"><dt>${k}</dt><dd>${v}</dd></div>` : '';
+    // `website` is the URL string on the business; `site` is what the crawler
+    // found. They are different things and must not be conflated.
+    const w = b.site;
+    let html = '';
+
+    html += row('Category', esc(b.category));
+    html += row('Address', esc(b.address));
+    html += row('Phone', esc(b.phone));
+    html += row('Source', esc(b.source));
+    html += row('Rating', b.rating ? b.rating.toFixed(1) : '');
+    html += row('Website', b.website
+      ? `<a href="${esc(b.website)}" target="_blank" rel="noopener">${esc(b.website)}</a>`
+      : '<span class="meta">none</span>');
+
+    if (b.score) {
+      html += '<h3>Score</h3>';
+      html += row('Total', `<b>${b.score.total_score}</b> &middot; ${esc(b.score.priority)}`);
+      html += row('Rules', b.score.rule_score);
+      if (b.score.ai_score) html += row('AI', b.score.ai_score);
+      html += row('Pitch', esc(b.score.sales_suggestion).replace(/\n/g, '<br>'));
+    }
+
+    if (w && w.url) {
+      html += '<h3>Crawl</h3>';
+      html += row('Status', w.status_code || 'unreachable');
+      html += row('Load time', w.load_time_ms ? w.load_time_ms + ' ms' : '');
+      html += row('HTTPS', w.has_ssl ? 'yes' : 'no');
+      html += row('Mobile friendly', w.is_mobile_friendly ? 'yes' : 'no');
+      html += row('Booking/checkout', w.has_booking ? 'yes' : 'no');
+      html += row('Title', esc(w.title));
+    }
+
+    if (b.contacts && b.contacts.length) {
+      html += '<h3>Contacts</h3>';
+      b.contacts.forEach((c) => {
+        const val = c.email || c.whatsapp || c.phone;
+        html += row(esc(c.contact_type || 'contact'),
+          esc(val) + ` <span class="meta">(${Math.round((c.confidence || 0) * 100)}% &middot; ${esc(c.source || '')})</span>`);
+      });
+    }
+
+    if (b.socials && b.socials.length) {
+      html += '<h3>Socials</h3>';
+      b.socials.forEach((s) => {
+        html += row(esc(s.platform), `<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.url)}</a>`);
+      });
+    }
+
+    if (b.audit) {
+      html += '<h3>AI audit</h3>';
+      html += row('Quality', b.audit.quality_score + '/10');
+      html += row('SEO', b.audit.seo_score + '/10');
+      html += row('Mobile', b.audit.mobile_score + '/10');
+      html += row('Summary', esc(b.audit.summary));
+      if (b.audit.issues && b.audit.issues.length) {
+        html += row('Issues', b.audit.issues.map(esc).join('<br>'));
+      }
+      if (b.audit.services_to_offer && b.audit.services_to_offer.length) {
+        html += row('Offer', b.audit.services_to_offer.map(esc).join(', '));
+      }
+    }
+
+    $('d-body').innerHTML = html;
+  } catch (e) {
+    $('d-body').innerHTML = '<p class="meta">Could not load: ' + esc(e.message) + '</p>';
+  }
+}
+
+// ---------------------------------------------------------------- scrape
+
+async function openScrape() {
+  try {
+    const r = await api('/scrape/sources');
+    const sources = r.sources || [];
+
+    $('s-source').innerHTML = sources.map((s) =>
+      `<option value="${esc(s)}">${esc(s)}</option>`).join('');
+
+    // google_maps is only registered when GOOGLE_PLACES_API_KEY is set, so say
+    // so rather than letting someone hunt for a missing option.
+    $('s-hint').innerHTML = sources.includes('google_maps')
+      ? ''
+      : 'Only <code>csv</code> is available. Set <code>GOOGLE_PLACES_API_KEY</code> in .env to enable <code>google_maps</code>.';
+
+    syncScrapeForm();
+    $('scrape').showModal();
+  } catch (e) {
+    toast('Could not load sources: ' + e.message, true);
+  }
+}
+
+function syncScrapeForm() {
+  const isCSV = $('s-source').value === 'csv';
+  $('s-file-row').style.display = isCSV ? 'flex' : 'none';
+}
+
+async function runScrape() {
+  const source = $('s-source').value;
+  const body = {
+    source,
+    category: $('s-category').value.trim(),
+    location: $('s-location').value.trim(),
+    limit: parseInt($('s-limit').value, 10) || 60,
+  };
+  if (source === 'csv') body.file = $('s-file').value.trim();
+
+  $('s-go').disabled = true;
+  try {
+    await api('/scrape', { method: 'POST', body: JSON.stringify(body) });
+    $('scrape').close();
+    toast('Scrape queued. Leads will appear as the worker scores them.');
+    poll();
+    setTimeout(load, 1500);
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    $('s-go').disabled = false;
+  }
+}
+
+// ---------------------------------------------------------------- wire up
+
+$('btn-scrape').onclick = openScrape;
+$('btn-refresh').onclick = () => { load(); poll(); };
+$('s-go').onclick = runScrape;
+$('s-source').onchange = syncScrapeForm;
+$('q').oninput = render;
+$('f-priority').onchange = render;
+$('f-website').onchange = render;
+
+load();
+poll();
+setInterval(poll, 5000);
+</script>
+</body>
+</html>
