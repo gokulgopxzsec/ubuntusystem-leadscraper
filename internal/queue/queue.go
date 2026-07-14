@@ -22,6 +22,9 @@ const (
 	JobRuleScoring       JobType = "rule_scoring"
 	JobAIAudit           JobType = "ai_audit"
 	JobGenRecommendation JobType = "gen_recommendation"
+	// JobEmbedLead is the last step: it turns the finished lead into a vector so
+	// it can be found by semantic search.
+	JobEmbedLead JobType = "embed_lead"
 )
 
 // ErrEmpty is returned by Dequeue when the poll window elapsed with no job

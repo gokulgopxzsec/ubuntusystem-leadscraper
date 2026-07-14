@@ -126,39 +126,6 @@ func (h *BusinessHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusNoContent, nil)
 }
 
-// Leads returns the scored, ranked list. This is the endpoint the sales team
-// lives in.
-func (h *BusinessHandler) Leads(w http.ResponseWriter, r *http.Request) {
-	limit := queryInt(r, "limit", 50)
-
-	scores, err := h.scores.ListHighPriority(r.Context(), limit)
-	if err != nil {
-		writeRepoError(w, err, "leads")
-		return
-	}
-
-	type lead struct {
-		*domain.LeadScore
-		Business *domain.Business `json:"business,omitempty"`
-	}
-
-	out := make([]lead, 0, len(scores))
-	for _, s := range scores {
-		item := lead{LeadScore: s}
-		if b, err := h.businesses.GetByID(r.Context(), s.BusinessID); err == nil {
-			item.Business = b
-		}
-		out = append(out, item)
-	}
-
-	writeJSON(w, http.StatusOK, listResponse{
-		Data:  out,
-		Total: int64(len(out)),
-		Page:  1,
-		Limit: limit,
-	})
-}
-
 // nonNilBusinesses keeps the JSON shape stable: an empty result should encode
 // as [] rather than null, or every client has to special-case it.
 func nonNilBusinesses(in []*domain.Business) []*domain.Business {

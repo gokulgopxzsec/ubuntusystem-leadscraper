@@ -149,6 +149,8 @@ func (w *Worker) execute(ctx context.Context, job *queue.Job) error {
 		return w.aiAudit(ctx, job)
 	case queue.JobGenRecommendation:
 		return w.genRecommendation(ctx, job)
+	case queue.JobEmbedLead:
+		return w.embedLead(ctx, job)
 	default:
 		// An unknown type will never become known. Returning nil retires it
 		// rather than cycling it through three pointless retries.

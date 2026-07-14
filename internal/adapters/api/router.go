@@ -11,6 +11,8 @@ import (
 	"github.com/makeforme/leadscraper/internal/adapters/api/handler"
 	"github.com/makeforme/leadscraper/internal/adapters/api/middleware"
 	"github.com/makeforme/leadscraper/internal/adapters/api/web"
+	"github.com/makeforme/leadscraper/internal/adapters/db/postgres"
+	"github.com/makeforme/leadscraper/internal/embed"
 	"github.com/makeforme/leadscraper/internal/ports"
 	"github.com/makeforme/leadscraper/internal/queue"
 )
@@ -30,6 +32,11 @@ type RouterDeps struct {
 	Scores     ports.LeadScoreRepository
 	Audits     ports.AuditRepository
 	Jobs       ports.ScrapeJobRepository
+
+	Leads         *postgres.LeadRepo
+	Embeddings    *postgres.EmbeddingRepo
+	Embedder      embed.Provider
+	MinSimilarity float64
 
 	Sources map[string]ports.SourceAdapter
 }
@@ -51,6 +58,8 @@ func NewRouter(deps RouterDeps) *chi.Mux {
 		deps.Socials, deps.Scores, deps.Audits,
 	)
 	scrape := handler.NewScrapeHandler(deps.Jobs, deps.Queue, deps.Sources)
+	search := handler.NewSearchHandler(deps.Embeddings, deps.Embedder, deps.MinSimilarity)
+	leads := handler.NewLeadHandler(deps.Leads, deps.Businesses, deps.Queue)
 
 	r.Route("/api/v1", func(r chi.Router) {
 		// Health and readiness stay unauthenticated so an orchestrator can
@@ -63,9 +72,23 @@ func NewRouter(deps RouterDeps) *chi.Mux {
 
 			r.Get("/businesses", business.List)
 			r.Get("/businesses/{id}", business.Get)
-			r.Delete("/businesses/{id}", business.Delete)
 
-			r.Get("/leads", business.Leads)
+			// CRUD over the lead list.
+			r.Post("/businesses", leads.Create)
+			r.Patch("/businesses/{id}", leads.Update)
+			r.Delete("/businesses/{id}", leads.Delete)
+			r.Post("/businesses/bulk-delete", leads.BulkDelete)
+			r.Post("/businesses/rescan", leads.Rescan)
+
+			// The dashboard's main view: every priority, filtered and sorted.
+			r.Get("/leads", leads.List)
+			r.Get("/leads/stats", leads.Stats)
+			r.Get("/leads/facets", leads.Facets)
+			r.Get("/leads/export", leads.Export)
+
+			// Ask the lead corpus questions in plain English.
+			r.Post("/search", search.Search)
+			r.Get("/search/status", search.Status)
 
 			r.Post("/scrape", scrape.Create)
 			r.Get("/scrape", scrape.List)

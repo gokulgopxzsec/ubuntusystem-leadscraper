@@ -17,7 +17,9 @@ x-app-env: &app-env
 
 services:
   postgres:
-    image: postgres:16-alpine
+    # pgvector, not plain postgres: semantic search needs the vector extension,
+    # and the stock image does not ship it.
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_DB: leadscraper
       POSTGRES_USER: postgres

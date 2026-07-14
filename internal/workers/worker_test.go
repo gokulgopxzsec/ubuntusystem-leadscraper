@@ -15,10 +15,10 @@ import (
 // blockingQueue stands in for Redis. Dequeue honours the timeout and the
 // context exactly as BRPop does, which is the behaviour under test.
 type blockingQueue struct {
-	dequeued  atomic.Int64
-	requeued  atomic.Int64
+	dequeued     atomic.Int64
+	requeued     atomic.Int64
 	deadLettered atomic.Int64
-	jobs      chan queue.Job
+	jobs         chan queue.Job
 }
 
 func newBlockingQueue(jobs ...queue.Job) *blockingQueue {

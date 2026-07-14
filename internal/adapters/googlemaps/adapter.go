@@ -72,16 +72,16 @@ type place struct {
 	DisplayName struct {
 		Text string `json:"text"`
 	} `json:"displayName"`
-	FormattedAddress      string   `json:"formattedAddress"`
-	NationalPhoneNumber   string   `json:"nationalPhoneNumber"`
-	InternationalPhone    string   `json:"internationalPhoneNumber"`
-	WebsiteURI            string   `json:"websiteUri"`
-	Rating                float64  `json:"rating"`
-	UserRatingCount       int      `json:"userRatingCount"`
-	PrimaryType           string   `json:"primaryType"`
-	Types                 []string `json:"types"`
-	BusinessStatus        string   `json:"businessStatus"`
-	Location              struct {
+	FormattedAddress    string   `json:"formattedAddress"`
+	NationalPhoneNumber string   `json:"nationalPhoneNumber"`
+	InternationalPhone  string   `json:"internationalPhoneNumber"`
+	WebsiteURI          string   `json:"websiteUri"`
+	Rating              float64  `json:"rating"`
+	UserRatingCount     int      `json:"userRatingCount"`
+	PrimaryType         string   `json:"primaryType"`
+	Types               []string `json:"types"`
+	BusinessStatus      string   `json:"businessStatus"`
+	Location            struct {
 		Latitude  float64 `json:"latitude"`
 		Longitude float64 `json:"longitude"`
 	} `json:"location"`

@@ -388,10 +388,7 @@ func toBusiness(rec []string, cols map[string]int, fallbackCategory string) *dom
 		return nil
 	}
 
-	address := get(colFullAddr)
-	if address == "" {
-		address = get(colAddress)
-	}
+	address := cleanAddress(get(colAddress), get(colFullAddr))
 
 	category := get(colCategory)
 	if category == "" {
@@ -426,6 +423,52 @@ func toBusiness(rec []string, cols map[string]int, fallbackCategory string) *dom
 	})
 
 	return b
+}
+
+// completeAddress is gosom's `complete_address` column, which is a JSON object
+// rather than a string — the one column in its output that is not plain text.
+type completeAddress struct {
+	Street     string `json:"street"`
+	Borough    string `json:"borough"`
+	City       string `json:"city"`
+	PostalCode string `json:"postal_code"`
+	State      string `json:"state"`
+	Country    string `json:"country"`
+}
+
+// cleanAddress prefers the plain `address` column, which is already the human
+// string Google shows.
+//
+// Preferring `complete_address` looked like the richer choice and was not: it is
+// a JSON object, so every address was stored as a raw `{"borough":...}` blob.
+// That is unreadable in the UI and useless in a CSV export. It is only worth
+// falling back to, and only after being flattened into a sentence.
+func cleanAddress(plain, complete string) string {
+	if plain = strings.TrimSpace(plain); plain != "" && !strings.HasPrefix(plain, "{") {
+		return plain
+	}
+
+	if complete = strings.TrimSpace(complete); complete == "" {
+		return plain
+	}
+
+	var c completeAddress
+	if err := json.Unmarshal([]byte(complete), &c); err != nil {
+		// Not the JSON we expected. A plain string here is still better than
+		// nothing, but a stray brace is not.
+		if strings.HasPrefix(complete, "{") {
+			return ""
+		}
+		return complete
+	}
+
+	parts := make([]string, 0, 5)
+	for _, p := range []string{c.Street, c.Borough, c.City, c.State, c.PostalCode} {
+		if p = strings.TrimSpace(p); p != "" {
+			parts = append(parts, p)
+		}
+	}
+	return strings.Join(parts, ", ")
 }
 
 func normalizeWebsite(raw string) string {

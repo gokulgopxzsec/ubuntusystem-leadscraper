@@ -23,6 +23,7 @@ import (
 	"github.com/makeforme/leadscraper/internal/ai/gemini"
 	"github.com/makeforme/leadscraper/internal/ai/openai"
 	"github.com/makeforme/leadscraper/internal/crawler"
+	"github.com/makeforme/leadscraper/internal/embed"
 	"github.com/makeforme/leadscraper/internal/ports"
 	"github.com/makeforme/leadscraper/internal/queue"
 	"github.com/makeforme/leadscraper/internal/scoring"
@@ -114,6 +115,7 @@ func run() error {
 
 	r := newRepos(pool)
 	sources := newSources(cfg, log)
+	embedder := newEmbedder(cfg, log)
 
 	// Both halves share this context, so one Ctrl-C stops the whole app and the
 	// worker still gets to drain its in-flight jobs.
@@ -136,12 +138,20 @@ func run() error {
 			AI:         newAIProvider(cfg, log),
 			Scoring:    scoring.NewDefaultEngine(),
 			Queue:      q,
+			Embedder:   embedder,
+			Embeddings: r.embeddings,
 			CrawlerCfg: cfg.Crawler,
 			AICfg:      cfg.AI,
 		}
 
 		worker := workers.NewWorker(q, deps, cfg.Worker, log)
 		group.Go(func() error { return worker.Start(gctx) })
+
+		// The relay is what moves jobs from the Postgres outbox onto Redis. It
+		// runs beside the worker: without it, nothing the pipeline queues would
+		// ever be picked up.
+		relay := queue.NewRelay(r.outbox, q, log)
+		group.Go(func() error { return relay.Start(gctx) })
 	}
 
 	if runAPI {
@@ -158,6 +168,11 @@ func run() error {
 			Audits:     r.audits,
 			Jobs:       r.jobs,
 			Sources:    sources,
+
+			Leads:         r.leads,
+			Embeddings:    r.embeddings,
+			Embedder:      embedder,
+			MinSimilarity: cfg.Embed.MinSimilarity,
 		})
 
 		srv := api.NewServer(cfg.Port, router, log)
@@ -179,6 +194,9 @@ type repos struct {
 	jobs       *postgres.JobRepo
 	crawls     *postgres.CrawlResultRepo
 	techs      *postgres.TechnologyRepo
+	leads      *postgres.LeadRepo
+	outbox     *postgres.OutboxRepo
+	embeddings *postgres.EmbeddingRepo
 }
 
 func newRepos(pool *pgxpool.Pool) *repos {
@@ -192,6 +210,9 @@ func newRepos(pool *pgxpool.Pool) *repos {
 		jobs:       postgres.NewJobRepo(pool),
 		crawls:     postgres.NewCrawlResultRepo(pool),
 		techs:      postgres.NewTechnologyRepo(pool),
+		leads:      postgres.NewLeadRepo(pool),
+		outbox:     postgres.NewOutboxRepo(pool),
+		embeddings: postgres.NewEmbeddingRepo(pool),
 	}
 }
 
@@ -245,5 +266,22 @@ func newAIProvider(cfg *config.Config, log *slog.Logger) ai.Provider {
 	default:
 		log.Info("no AI provider configured; leads will be scored by rules only")
 		return ai.Noop{}
+	}
+}
+
+// newEmbedder builds the provider that powers semantic search. With none
+// configured, search silently falls back to keyword matching rather than
+// breaking, and the API reports which mode ran.
+func newEmbedder(cfg *config.Config, log *slog.Logger) embed.Provider {
+	switch cfg.Embed.Provider {
+	case "gemini":
+		log.Info("semantic search enabled", "provider", "gemini", "model", cfg.Embed.Model)
+		return embed.NewGemini(cfg.Embed.APIKey, cfg.Embed.Model, cfg.Embed.BaseURL, cfg.Embed.Timeout)
+	case "openai":
+		log.Info("semantic search enabled", "provider", "openai", "model", cfg.Embed.Model)
+		return embed.NewOpenAI(cfg.Embed.APIKey, cfg.Embed.Model, cfg.Embed.BaseURL, cfg.Embed.Timeout)
+	default:
+		log.Info("no embedding provider; search will fall back to keyword matching")
+		return embed.Noop{}
 	}
 }

@@ -2,6 +2,7 @@ package ports
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/makeforme/leadscraper/internal/domain"
 )
@@ -14,6 +15,16 @@ type BusinessRepository interface {
 	Delete(ctx context.Context, id string) error
 	FindDuplicates(ctx context.Context, name, phone, website string) ([]*domain.Business, error)
 	BulkInsert(ctx context.Context, businesses []*domain.Business) (int, error)
+
+	// BulkInsertWithJobs stores the businesses and their follow-up jobs in one
+	// transaction. Committing the businesses and then enqueueing leaves a window
+	// where a crash strands them: stored, but with no job to ever crawl or score
+	// them. jobFor is called per business once its ID is known.
+	BulkInsertWithJobs(
+		ctx context.Context,
+		businesses []*domain.Business,
+		jobFor func(*domain.Business) (json.RawMessage, bool),
+	) (int, error)
 }
 
 type WebsiteRepository interface {

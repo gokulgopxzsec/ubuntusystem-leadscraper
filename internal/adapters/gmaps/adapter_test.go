@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/makeforme/leadscraper/internal/ports"
@@ -62,9 +63,10 @@ func TestStreamMapsGosomColumns(t *testing.T) {
 	if b.Name != "Sweet Crumbs Bakery" {
 		t.Errorf("Name = %q", b.Name)
 	}
-	// complete_address is richer than address, so it wins.
-	if b.Address != "12 MG Road, Kochi, Kerala 682011" {
-		t.Errorf("Address = %q, want complete_address to be preferred", b.Address)
+	// The plain `address` column wins. complete_address looks richer but is a
+	// JSON object, and preferring it stored every address as a raw blob.
+	if b.Address != "MG Road, Kochi" {
+		t.Errorf("Address = %q, want the plain human-readable address column", b.Address)
 	}
 	if b.Phone != "+91 98765 43210" {
 		t.Errorf("Phone = %q", b.Phone)
@@ -184,5 +186,46 @@ func TestHostPathRefusesToRewriteAPathOutsideWorkDir(t *testing.T) {
 
 	if got := a.hostPath("/somewhere/else"); got != "/somewhere/else" {
 		t.Errorf("hostPath() = %q, want the unrelated path left alone", got)
+	}
+}
+
+// gosom's complete_address column is a JSON object, not a string -- the one
+// column in its output that is not plain text. Preferring it over the plain
+// `address` column stored every address as a raw {"borough":...} blob.
+func TestCleanAddressPrefersThePlainColumn(t *testing.T) {
+	plain := "12 MG Road, Kochi, Kerala 682011"
+	jsonBlob := `{"borough":"Kaloor","street":"CPRA 52","city":"Kochi","postal_code":"682017"}`
+
+	if got := cleanAddress(plain, jsonBlob); got != plain {
+		t.Errorf("cleanAddress() = %q, want the human-readable plain column %q", got, plain)
+	}
+}
+
+func TestCleanAddressFlattensTheJSONFallback(t *testing.T) {
+	// With no plain address, the JSON is worth using -- but as a sentence, not
+	// as a blob.
+	got := cleanAddress("", `{"borough":"Kaloor","street":"CPRA 52, Perandoor Rd","city":"Kochi","state":"Kerala","postal_code":"682017"}`)
+	want := "CPRA 52, Perandoor Rd, Kaloor, Kochi, Kerala, 682017"
+
+	if got != want {
+		t.Errorf("cleanAddress() = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "{") {
+		t.Errorf("raw JSON leaked into the address: %q", got)
+	}
+}
+
+func TestCleanAddressNeverReturnsRawJSON(t *testing.T) {
+	// Even if the plain column itself somehow holds the blob.
+	blob := `{"borough":"Kaloor","city":"Kochi"}`
+
+	if got := cleanAddress(blob, blob); strings.Contains(got, "{") {
+		t.Errorf("raw JSON must never reach the database, got %q", got)
+	}
+}
+
+func TestCleanAddressHandlesUnparseableInput(t *testing.T) {
+	if got := cleanAddress("", "not json at all"); got != "not json at all" {
+		t.Errorf("a non-JSON fallback should pass through, got %q", got)
 	}
 }

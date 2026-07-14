@@ -1,0 +1,2 @@
+-- The original JSON blobs are not recoverable, and were never useful. This is a
+-- one-way data repair.

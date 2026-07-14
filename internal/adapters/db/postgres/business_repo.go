@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -189,9 +190,26 @@ func (r *BusinessRepo) FindDuplicates(ctx context.Context, name, phone, website 
 }
 
 // BulkInsert upserts on the (source, source_key) dedup index and reports how
-// many rows were new. Records without a source_key cannot be deduped, so they
-// are inserted plainly.
+// many rows were new.
 func (r *BusinessRepo) BulkInsert(ctx context.Context, businesses []*domain.Business) (int, error) {
+	return r.BulkInsertWithJobs(ctx, businesses, nil)
+}
+
+// BulkInsertWithJobs upserts the businesses and writes their follow-up jobs to
+// the outbox in the *same transaction*.
+//
+// This is the point of the outbox. Committing the businesses and then enqueueing
+// their jobs leaves a window: a crash in between leaves the businesses stored
+// with no job to ever crawl or score them — not failed, just invisible. Here,
+// either both land or neither does.
+//
+// jobFor is called once per business after its ID is known, and returns the job
+// to queue for it (or false for none).
+func (r *BusinessRepo) BulkInsertWithJobs(
+	ctx context.Context,
+	businesses []*domain.Business,
+	jobFor func(*domain.Business) (json.RawMessage, bool),
+) (int, error) {
 	if len(businesses) == 0 {
 		return 0, nil
 	}
@@ -203,6 +221,8 @@ func (r *BusinessRepo) BulkInsert(ctx context.Context, businesses []*domain.Busi
 	defer tx.Rollback(ctx)
 
 	inserted := 0
+	var jobs []json.RawMessage
+
 	for _, b := range businesses {
 		var lat, lng *float64
 		if b.Coordinates != nil {
@@ -238,6 +258,18 @@ func (r *BusinessRepo) BulkInsert(ctx context.Context, businesses []*domain.Busi
 		if isNew {
 			inserted++
 		}
+
+		if jobFor != nil {
+			if payload, ok := jobFor(b); ok {
+				jobs = append(jobs, payload)
+			}
+		}
+	}
+
+	// The jobs land in the outbox inside this same transaction, so they cannot
+	// be lost if the process dies before the relay reaches Redis.
+	if err := EnqueueTx(ctx, tx, jobs...); err != nil {
+		return 0, err
 	}
 
 	if err := tx.Commit(ctx); err != nil {

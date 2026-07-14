@@ -22,6 +22,7 @@ type Config struct {
 	Worker   WorkerConfig
 	Sources  SourcesConfig
 	Gmaps    GmapsConfig
+	Embed    EmbedConfig
 }
 
 type DatabaseConfig struct {
@@ -56,6 +57,26 @@ type AIConfig struct {
 	// MaxHTMLChars bounds how much page HTML reaches the model. A whole page
 	// blows past the context window and costs far more than it adds.
 	MaxHTMLChars int `env:"AI_MAX_HTML_CHARS, default=12000"`
+}
+
+// EmbedConfig powers semantic search over the leads.
+//
+// Without a provider the search box falls back to keyword matching rather than
+// breaking, and the API says which one ran.
+type EmbedConfig struct {
+	// none | gemini | openai. Defaults to following AI_PROVIDER, since if you
+	// have configured one you almost certainly want the other.
+	Provider string `env:"EMBED_PROVIDER"`
+	APIKey   string `env:"EMBED_API_KEY"`
+	// Both defaults produce 768 dimensions, which is what the schema is fixed at:
+	// gemini text-embedding-004 natively, openai text-embedding-3-small via its
+	// dimensions parameter.
+	Model   string        `env:"EMBED_MODEL"`
+	BaseURL string        `env:"EMBED_BASE_URL"`
+	Timeout time.Duration `env:"EMBED_TIMEOUT, default=30s"`
+	// Drops weak matches. Cosine similarity always returns something, so without
+	// a floor a search for "dentists" cheerfully returns bakeries, ranked.
+	MinSimilarity float64 `env:"EMBED_MIN_SIMILARITY, default=0.3"`
 }
 
 type CrawlerConfig struct {
@@ -140,10 +161,40 @@ func Load(ctx context.Context) (*Config, error) {
 		return nil, fmt.Errorf("load config: %w", err)
 	}
 	cfg.Version = version()
+	cfg.applyDefaults()
+
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+// applyDefaults fills in the settings that are almost always the same as
+// something you have already configured.
+func (c *Config) applyDefaults() {
+	// If you set up an AI provider, you want embeddings from the same place with
+	// the same key. Making people configure it twice is a way to get one of them
+	// wrong.
+	if c.Embed.Provider == "" {
+		c.Embed.Provider = c.AI.Provider
+	}
+	if c.Embed.APIKey == "" {
+		c.Embed.APIKey = c.AI.APIKey
+	}
+	if c.Embed.BaseURL == "" && c.Embed.Provider == c.AI.Provider {
+		c.Embed.BaseURL = c.AI.BaseURL
+	}
+
+	// The default model per provider is the one that yields 768 dimensions, which
+	// is what the lead_embeddings column is fixed at.
+	if c.Embed.Model == "" {
+		switch c.Embed.Provider {
+		case "gemini":
+			c.Embed.Model = "text-embedding-004"
+		case "openai":
+			c.Embed.Model = "text-embedding-3-small"
+		}
+	}
 }
 
 func (c *Config) validate() error {
@@ -167,6 +218,18 @@ func (c *Config) validate() error {
 	}
 	if (c.AI.Provider == "gemini" || c.AI.Provider == "openai") && c.AI.APIKey == "" {
 		return fmt.Errorf("AI_PROVIDER=%s requires AI_API_KEY", c.AI.Provider)
+	}
+
+	switch c.Embed.Provider {
+	case "", "none", "gemini", "openai":
+	default:
+		return fmt.Errorf("unsupported EMBED_PROVIDER %q (want gemini, openai, or none)", c.Embed.Provider)
+	}
+	if (c.Embed.Provider == "gemini" || c.Embed.Provider == "openai") && c.Embed.APIKey == "" {
+		return fmt.Errorf("EMBED_PROVIDER=%s requires EMBED_API_KEY (or AI_API_KEY)", c.Embed.Provider)
+	}
+	if c.Embed.MinSimilarity < 0 || c.Embed.MinSimilarity > 1 {
+		return fmt.Errorf("EMBED_MIN_SIMILARITY must be between 0 and 1, got %v", c.Embed.MinSimilarity)
 	}
 	if c.Environment == "production" && c.Auth.JWTSecret == "dev-secret-change-in-production" {
 		return fmt.Errorf("JWT_SECRET must be set in production")

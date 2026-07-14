@@ -6,12 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/makeforme/leadscraper/internal/adapters/db/postgres"
 	"github.com/makeforme/leadscraper/internal/ai"
 	"github.com/makeforme/leadscraper/internal/crawler"
 	"github.com/makeforme/leadscraper/internal/domain"
+	"github.com/makeforme/leadscraper/internal/embed"
 	"github.com/makeforme/leadscraper/internal/extract"
 	"github.com/makeforme/leadscraper/internal/ports"
 	"github.com/makeforme/leadscraper/internal/queue"
@@ -37,6 +40,11 @@ type Deps struct {
 	AI      ai.Provider
 	Scoring *scoring.Engine
 	Queue   queue.Queue
+
+	// Embeddings powers semantic search. Both are nil-safe: with no provider
+	// configured the embed step is skipped and search falls back to keywords.
+	Embedder   embed.Provider
+	Embeddings *postgres.EmbeddingRepo
 
 	CrawlerCfg config.CrawlerConfig
 	AICfg      config.AIConfig
@@ -104,25 +112,32 @@ func (w *Worker) collectBusiness(ctx context.Context, job *queue.Job) error {
 		return fmt.Errorf("source %s: %w", p.Source, err)
 	}
 
-	inserted, err := w.deps.Businesses.BulkInsert(ctx, batch)
+	// The businesses and their follow-up jobs are committed together, through the
+	// outbox. Storing them and *then* enqueueing left a window: a crash in
+	// between stranded the businesses in Postgres with no job to ever crawl or
+	// score them. Not failed, just invisible.
+	//
+	// Every business needs scoring. Those with a website get crawled first and
+	// the crawl chain ends in a scoring job; the rest are scored immediately.
+	queued := 0
+	inserted, err := w.deps.Businesses.BulkInsertWithJobs(ctx, batch,
+		func(b *domain.Business) (json.RawMessage, bool) {
+			next := queue.Job{Type: queue.JobRuleScoring, BusinessID: b.ID}
+			if b.Website != "" {
+				next = queue.Job{Type: queue.JobWebsiteCrawl, BusinessID: b.ID, URL: b.Website}
+			}
+
+			payload, err := json.Marshal(next)
+			if err != nil {
+				log.Error("could not marshal follow-up job", "business_id", b.ID, "error", err)
+				return nil, false
+			}
+			queued++
+			return payload, true
+		})
 	if err != nil {
 		w.failJob(ctx, p.ScrapeJobID, err)
 		return fmt.Errorf("store businesses: %w", err)
-	}
-
-	// Every business needs scoring. Those with a website get crawled first, and
-	// the crawl chain ends in a scoring job; the rest are scored immediately.
-	queued := 0
-	for _, b := range batch {
-		next := queue.Job{Type: queue.JobRuleScoring, BusinessID: b.ID}
-		if b.Website != "" {
-			next = queue.Job{Type: queue.JobWebsiteCrawl, BusinessID: b.ID, URL: b.Website}
-		}
-		if err := w.deps.Queue.Enqueue(ctx, next); err != nil {
-			log.Error("enqueue follow-up failed", "business_id", b.ID, "error", err)
-			continue
-		}
-		queued++
 	}
 
 	log.Info("collection finished",
@@ -560,7 +575,125 @@ func (w *Worker) genRecommendation(ctx context.Context, job *queue.Job) error {
 	}
 
 	w.log.Info("recommendation generated", "business_id", job.BusinessID)
+
+	return w.deps.Queue.Enqueue(ctx, queue.Job{
+		Type: queue.JobEmbedLead, BusinessID: job.BusinessID,
+	})
+}
+
+// embedLead turns the finished lead into a vector so semantic search can find
+// it. This runs last, once the business, its crawl, its score and its audit are
+// all known — embedding it earlier would capture a half-built lead.
+func (w *Worker) embedLead(ctx context.Context, job *queue.Job) error {
+	if job.BusinessID == "" {
+		return errors.New("embed_lead needs a business_id")
+	}
+
+	// No provider is a normal configuration, not a failure: search falls back to
+	// keyword matching.
+	if !embed.Enabled(w.deps.Embedder) || w.deps.Embeddings == nil {
+		return nil
+	}
+
+	doc, err := w.buildDocument(ctx, job.BusinessID)
+	if err != nil {
+		return err
+	}
+
+	content := doc.Text()
+	hash := embed.Hash(content)
+	model := w.deps.Embedder.Model()
+
+	// Re-embedding an unchanged lead is a wasted API call, and this job re-runs
+	// on every rescore.
+	needed, err := w.deps.Embeddings.NeedsEmbedding(ctx, job.BusinessID, hash, model)
+	if err != nil {
+		return fmt.Errorf("check embedding: %w", err)
+	}
+	if !needed {
+		w.log.Debug("lead unchanged, skipping embed", "business_id", job.BusinessID)
+		return nil
+	}
+
+	vecs, err := w.deps.Embedder.EmbedDocuments(ctx, []string{content})
+	if err != nil {
+		if errors.Is(err, embed.ErrNotConfigured) {
+			return nil
+		}
+		return fmt.Errorf("embed lead: %w", err)
+	}
+	if len(vecs) != 1 {
+		return fmt.Errorf("embedder returned %d vectors for one document", len(vecs))
+	}
+
+	if err := w.deps.Embeddings.Upsert(ctx, job.BusinessID, content, hash, model, vecs[0]); err != nil {
+		return err
+	}
+
+	w.log.Info("lead embedded", "business_id", job.BusinessID, "model", model)
 	return nil
+}
+
+// buildDocument assembles the text that represents this lead for retrieval.
+func (w *Worker) buildDocument(ctx context.Context, businessID string) (embed.LeadDocument, error) {
+	business, err := w.deps.Businesses.GetByID(ctx, businessID)
+	if err != nil {
+		return embed.LeadDocument{}, fmt.Errorf("load business: %w", err)
+	}
+
+	doc := embed.LeadDocument{
+		Name:     business.Name,
+		Category: business.Category,
+		Address:  business.Address,
+		Rating:   business.Rating,
+		Website:  business.Website,
+	}
+
+	if _, ok := extract.SocialOnly(business.Website); ok {
+		doc.SocialOnly = true
+	}
+
+	// Review count lives in metadata; it is the signal that says whether the
+	// business is actually trading.
+	var meta struct {
+		ReviewCount int `json:"review_count"`
+	}
+	if len(business.Metadata) > 0 {
+		_ = json.Unmarshal(business.Metadata, &meta)
+		doc.Reviews = meta.ReviewCount
+	}
+
+	// The rest is best-effort: a lead with no crawl or no score is still worth
+	// embedding on the strength of its Maps data alone.
+	if score, err := w.deps.Scores.GetByBusinessID(ctx, businessID); err == nil {
+		doc.Priority = score.Priority
+		for gap, weight := range score.Breakdown {
+			if weight > 0 {
+				doc.Gaps = append(doc.Gaps, gap)
+			}
+		}
+		sort.Strings(doc.Gaps) // stable text, so the hash is stable
+	}
+
+	if site, err := w.deps.Websites.GetByBusinessID(ctx, businessID); err == nil {
+		doc.SiteTitle = site.Title
+		if cr, err := w.deps.CrawlResults.GetByWebsiteID(ctx, site.ID); err == nil && cr.HTML != "" {
+			doc.SiteText = extract.StripTags(cr.HTML)
+		} else if site.MetaDescription != "" {
+			doc.SiteText = site.MetaDescription
+		}
+	}
+
+	if contacts, err := w.deps.Contacts.GetByBusinessID(ctx, businessID); err == nil {
+		for _, c := range contacts {
+			if c.Email != "" {
+				doc.Contacts = append(doc.Contacts, c.Email)
+			}
+		}
+		sort.Strings(doc.Contacts)
+	}
+
+	return doc, nil
 }
 
 // ---------- helpers ----------

@@ -30,18 +30,18 @@ type Page struct {
 
 // Result is everything a single-site crawl produced.
 type Result struct {
-	BaseURL      string
-	Pages        []Page
-	Reachable    bool
-	HasSSL       bool
-	StatusCode   int
-	LoadTimeMs   int
-	Title        string
-	MetaDesc     string
-	HasViewport  bool
+	BaseURL        string
+	Pages          []Page
+	Reachable      bool
+	HasSSL         bool
+	StatusCode     int
+	LoadTimeMs     int
+	Title          string
+	MetaDesc       string
+	HasViewport    bool
 	HasContactForm bool
-	HasBooking   bool
-	Error        string
+	HasBooking     bool
+	Error          string
 }
 
 type Crawler struct {

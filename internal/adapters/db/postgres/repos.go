@@ -17,27 +17,45 @@ type WebsiteRepo struct{ pool *pgxpool.Pool }
 
 func NewWebsiteRepo(pool *pgxpool.Pool) *WebsiteRepo { return &WebsiteRepo{pool: pool} }
 
+// Create upserts on business_id.
+//
+// It used to be a plain INSERT with no unique constraint behind it, so every
+// retry or re-crawl appended another row. GetByBusinessID hid that behind
+// ORDER BY created_at DESC LIMIT 1, so the table grew silently while old
+// crawl_results pointed at website rows nobody would read again. A re-crawl is
+// the normal case, not an error, so it updates in place.
 func (r *WebsiteRepo) Create(ctx context.Context, w *domain.Website) error {
 	err := r.pool.QueryRow(ctx, `
 		INSERT INTO websites
 			(business_id, url, status_code, load_time_ms, has_ssl, has_booking,
 			 is_mobile_friendly, pages_crawled, title, meta_description, crawled_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+		ON CONFLICT (business_id) DO UPDATE SET
+			url = EXCLUDED.url,
+			status_code = EXCLUDED.status_code,
+			load_time_ms = EXCLUDED.load_time_ms,
+			has_ssl = EXCLUDED.has_ssl,
+			has_booking = EXCLUDED.has_booking,
+			is_mobile_friendly = EXCLUDED.is_mobile_friendly,
+			pages_crawled = EXCLUDED.pages_crawled,
+			title = EXCLUDED.title,
+			meta_description = EXCLUDED.meta_description,
+			crawled_at = EXCLUDED.crawled_at
 		RETURNING id, created_at`,
 		w.BusinessID, w.URL, w.StatusCode, w.LoadTimeMs, w.HasSSL, w.HasBooking,
 		w.IsMobileFriendly, w.PagesCrawled, nullStr(w.Title),
 		nullStr(w.MetaDescription), w.CrawledAt,
 	).Scan(&w.ID, &w.CreatedAt)
 	if err != nil {
-		return fmt.Errorf("insert website: %w", err)
+		return fmt.Errorf("upsert website: %w", err)
 	}
 	return nil
 }
 
 func (r *WebsiteRepo) GetByBusinessID(ctx context.Context, businessID string) (*domain.Website, error) {
 	var (
-		w                 domain.Website
-		title, metaDesc   *string
+		w                  domain.Website
+		title, metaDesc    *string
 		statusCode, loadMs *int32
 	)
 	err := r.pool.QueryRow(ctx, `
@@ -614,9 +632,9 @@ func (r *CrawlResultRepo) Create(ctx context.Context, c *domain.CrawlResult) err
 
 func (r *CrawlResultRepo) GetByWebsiteID(ctx context.Context, websiteID string) (*domain.CrawlResult, error) {
 	var (
-		c                  domain.CrawlResult
-		html, title, cErr  *string
-		metaTags           []byte
+		c                 domain.CrawlResult
+		html, title, cErr *string
+		metaTags          []byte
 	)
 	err := r.pool.QueryRow(ctx, `
 		SELECT id, website_id, url, status_code, html, title, meta_tags, links, error, crawled_at
