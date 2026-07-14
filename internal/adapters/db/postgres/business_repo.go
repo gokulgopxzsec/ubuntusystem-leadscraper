@@ -311,9 +311,23 @@ func scanBusiness(rows pgx.Rows) (*domain.Business, error) {
 	return &b, nil
 }
 
+const (
+	defaultPageSize = 50
+	maxPageSize     = 500
+)
+
+// paginate clamps the page size rather than rejecting it.
+//
+// It used to fall back to the *default* when the limit was out of range, so
+// asking for 500 silently returned 50 — you got fewer rows than you asked for and
+// nothing said so. A caller trying to act on every lead would quietly act on the
+// first fifty. Over the ceiling now means the ceiling.
 func paginate(page, limit int) (int, int) {
-	if limit <= 0 || limit > 200 {
-		limit = 50
+	switch {
+	case limit <= 0:
+		limit = defaultPageSize
+	case limit > maxPageSize:
+		limit = maxPageSize
 	}
 	if page < 1 {
 		page = 1
