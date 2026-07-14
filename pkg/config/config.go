@@ -21,6 +21,7 @@ type Config struct {
 	Crawler  CrawlerConfig
 	Worker   WorkerConfig
 	Sources  SourcesConfig
+	Gmaps    GmapsConfig
 }
 
 type DatabaseConfig struct {
@@ -68,16 +69,54 @@ type CrawlerConfig struct {
 }
 
 type WorkerConfig struct {
-	Concurrency  int           `env:"WORKER_CONCURRENCY, default=4"`
-	JobTimeout   time.Duration `env:"WORKER_JOB_TIMEOUT, default=2m"`
-	MinJobDelay  time.Duration `env:"WORKER_MIN_JOB_DELAY, default=500ms"`
-	MaxJobDelay  time.Duration `env:"WORKER_MAX_JOB_DELAY, default=2s"`
-	ShutdownWait time.Duration `env:"WORKER_SHUTDOWN_WAIT, default=30s"`
+	Concurrency int           `env:"WORKER_CONCURRENCY, default=4"`
+	JobTimeout  time.Duration `env:"WORKER_JOB_TIMEOUT, default=2m"`
+	// A collection job drives a headless browser over Google Maps for minutes on
+	// end. The ordinary 2m job timeout would kill every Maps scrape before it
+	// produced a single row, so collection gets its own, much longer budget.
+	CollectTimeout time.Duration `env:"WORKER_COLLECT_TIMEOUT, default=30m"`
+	MinJobDelay    time.Duration `env:"WORKER_MIN_JOB_DELAY, default=500ms"`
+	MaxJobDelay    time.Duration `env:"WORKER_MAX_JOB_DELAY, default=2s"`
+	ShutdownWait   time.Duration `env:"WORKER_SHUTDOWN_WAIT, default=30s"`
 }
 
 type SourcesConfig struct {
 	GooglePlacesAPIKey string `env:"GOOGLE_PLACES_API_KEY"`
 	CSVDir             string `env:"CSV_IMPORT_DIR, default=data"`
+}
+
+// GmapsConfig drives gosom/google-maps-scraper, which scrapes Google Maps with
+// a headless Chromium and needs no API key.
+type GmapsConfig struct {
+	Enabled bool `env:"GMAPS_ENABLED, default=true"`
+	// binary (a google-maps-scraper on PATH) or docker (the published image).
+	Mode        string `env:"GMAPS_MODE, default=docker"`
+	Binary      string `env:"GMAPS_BINARY, default=google-maps-scraper"`
+	DockerImage string `env:"GMAPS_DOCKER_IMAGE, default=gosom/google-maps-scraper:latest"`
+
+	// Each unit of concurrency is a headless Chromium. gosom's own Kubernetes
+	// example asks for 512Mi per instance, so on a 2-core / 7GB box this stays
+	// at 1: raising it is the fastest way to push the machine into swap.
+	Concurrency int `env:"GMAPS_CONCURRENCY, default=1"`
+	// How far the Maps results list is scrolled. Each extra level is roughly
+	// another page of businesses, and a lot more browser work.
+	Depth int    `env:"GMAPS_DEPTH, default=2"`
+	Lang  string `env:"GMAPS_LANG, default=en"`
+
+	// gosom waits for more work rather than exiting, so without this the job
+	// would hang until our own timeout killed it.
+	ExitOnInactivity time.Duration `env:"GMAPS_EXIT_ON_INACTIVITY, default=2m"`
+	// A hard ceiling on one scrape. A browser-driven crawl is slow; on a small
+	// machine, give it room.
+	Timeout time.Duration `env:"GMAPS_TIMEOUT, default=20m"`
+
+	// gosom can visit each business's website to pull emails. It roughly doubles
+	// the work, and our own crawler already does this, so it is off by default.
+	ExtractEmail bool `env:"GMAPS_EXTRACT_EMAIL, default=false"`
+
+	// Where the scraper's temporary query and result files go. Empty means the
+	// system temp directory.
+	WorkDir string `env:"GMAPS_WORK_DIR"`
 }
 
 func Load(ctx context.Context) (*Config, error) {

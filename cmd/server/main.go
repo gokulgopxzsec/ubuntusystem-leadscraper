@@ -15,6 +15,7 @@ import (
 	"github.com/makeforme/leadscraper/internal/adapters/api"
 	"github.com/makeforme/leadscraper/internal/adapters/csv"
 	"github.com/makeforme/leadscraper/internal/adapters/db/postgres"
+	"github.com/makeforme/leadscraper/internal/adapters/gmaps"
 	"github.com/makeforme/leadscraper/internal/adapters/googlemaps"
 	"github.com/makeforme/leadscraper/internal/ai"
 	"github.com/makeforme/leadscraper/internal/ai/gemini"
@@ -96,7 +97,7 @@ func run() error {
 	}
 
 	r := newRepos(pool)
-	sources := newSources(cfg)
+	sources := newSources(cfg, log)
 
 	if isWorker {
 		deps := &workers.Deps{
@@ -166,18 +167,32 @@ func newRepos(pool *pgxpool.Pool) *repos {
 	}
 }
 
-// newSources registers only the adapters that are actually usable. Google
-// Places without a key would accept jobs and then fail every one of them, so
-// it is left out and /scrape reports it as an unknown source.
-func newSources(cfg *config.Config) map[string]ports.SourceAdapter {
+// newSources registers only the adapters that can actually run. A source that
+// would accept jobs and then fail every one of them is worse than one that is
+// absent, because /scrape can reject an unknown source up front.
+func newSources(cfg *config.Config, log *slog.Logger) map[string]ports.SourceAdapter {
 	sources := map[string]ports.SourceAdapter{
 		"csv": csv.NewAdapter(cfg.Sources.CSVDir),
 	}
 
+	// google_maps scrapes Maps directly through gosom/google-maps-scraper and
+	// needs no API key. This is the source that produces real leads.
+	if cfg.Gmaps.Enabled {
+		gm := gmaps.NewAdapter(cfg.Gmaps, log)
+		if err := gm.Available(); err != nil {
+			log.Warn("the google_maps source is disabled", "error", err)
+		} else {
+			sources["google_maps"] = gm
+			log.Info("google_maps source ready",
+				"mode", cfg.Gmaps.Mode, "concurrency", cfg.Gmaps.Concurrency, "depth", cfg.Gmaps.Depth)
+		}
+	}
+
+	// google_places is the paid, official API. It is an alternative to scraping,
+	// not a requirement, so it stays optional and separately named.
 	if cfg.Sources.GooglePlacesAPIKey != "" {
-		sources["google_maps"] = googlemaps.NewAdapter(cfg.Sources.GooglePlacesAPIKey)
-	} else {
-		slog.Warn("GOOGLE_PLACES_API_KEY not set: the google_maps source is disabled")
+		sources["google_places"] = googlemaps.NewAdapter(cfg.Sources.GooglePlacesAPIKey)
+		log.Info("google_places source ready (official API)")
 	}
 
 	return sources

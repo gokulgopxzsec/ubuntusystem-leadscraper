@@ -100,8 +100,8 @@ func (w *Worker) run(parent context.Context, job *queue.Job) {
 
 	// The job body is detached from the parent's cancellation but keeps a hard
 	// deadline. A job killed mid-write would leave the database inconsistent,
-	// so it gets JobTimeout to finish even once shutdown has begun.
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), w.cfg.JobTimeout)
+	// so it gets its full budget to finish even once shutdown has begun.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), w.timeout(job.Type))
 	defer cancel()
 
 	// A panic in one handler must not take down the worker process.
@@ -155,6 +155,16 @@ func (w *Worker) execute(ctx context.Context, job *queue.Job) error {
 		w.log.Warn("unknown job type, discarding", "type", job.Type, "job_id", job.ID)
 		return nil
 	}
+}
+
+// timeout is per job type. A collection job drives a headless browser over
+// Google Maps and routinely runs for many minutes; the ordinary 2m budget would
+// kill every Maps scrape before it produced a single row.
+func (w *Worker) timeout(t queue.JobType) time.Duration {
+	if t == queue.JobCollectBusiness {
+		return w.cfg.CollectTimeout
+	}
+	return w.cfg.JobTimeout
 }
 
 // pause spreads out the requests we make to third-party sites and APIs. It is
