@@ -118,16 +118,22 @@ func (fp fingerprint) matches(lowerHTML string, headers http.Header) bool {
 	return false
 }
 
+// Go's regexp is RE2, which has no backreferences, so each element needs its
+// own pattern rather than one `<(script|style)>.*?</\1>`.
 var (
-	tagRe     = regexp.MustCompile(`(?s)<(script|style|noscript)\b[^>]*>.*?</\s*\1\s*>`)
-	anyTagRe  = regexp.MustCompile(`<[^>]+>`)
-	spacesRe  = regexp.MustCompile(`\s+`)
+	scriptRe   = regexp.MustCompile(`(?is)<script\b[^>]*>.*?</script\s*>`)
+	styleRe    = regexp.MustCompile(`(?is)<style\b[^>]*>.*?</style\s*>`)
+	noscriptRe = regexp.MustCompile(`(?is)<noscript\b[^>]*>.*?</noscript\s*>`)
+	anyTagRe   = regexp.MustCompile(`<[^>]+>`)
+	spacesRe   = regexp.MustCompile(`\s+`)
 )
 
 // StripTags reduces HTML to its visible text. Script and style bodies go first,
 // since they hold most of the noise that fools the contact regexes.
 func StripTags(html string) string {
-	s := tagRe.ReplaceAllString(html, " ")
+	s := scriptRe.ReplaceAllString(html, " ")
+	s = styleRe.ReplaceAllString(s, " ")
+	s = noscriptRe.ReplaceAllString(s, " ")
 	s = anyTagRe.ReplaceAllString(s, " ")
 	s = strings.NewReplacer(
 		"&nbsp;", " ", "&amp;", "&", "&lt;", "<", "&gt;", ">",

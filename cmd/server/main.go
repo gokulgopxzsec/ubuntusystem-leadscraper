@@ -3,68 +3,204 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/makeforme/leadscraper/internal/adapters/api"
+	"github.com/makeforme/leadscraper/internal/adapters/csv"
+	"github.com/makeforme/leadscraper/internal/adapters/db/postgres"
+	"github.com/makeforme/leadscraper/internal/adapters/googlemaps"
+	"github.com/makeforme/leadscraper/internal/ai"
+	"github.com/makeforme/leadscraper/internal/ai/gemini"
+	"github.com/makeforme/leadscraper/internal/ai/openai"
+	"github.com/makeforme/leadscraper/internal/crawler"
+	"github.com/makeforme/leadscraper/internal/ports"
 	"github.com/makeforme/leadscraper/internal/queue"
+	"github.com/makeforme/leadscraper/internal/scoring"
 	"github.com/makeforme/leadscraper/internal/workers"
 	"github.com/makeforme/leadscraper/pkg/config"
 	"github.com/makeforme/leadscraper/pkg/logger"
 )
 
 func main() {
+	if err := run(); err != nil {
+		slog.Error("fatal", "error", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	var isWorker bool
 	flag.BoolVar(&isWorker, "worker", false, "start in worker mode")
 	flag.Parse()
 
-	ctx := context.Background()
+	// Both modes shut down on SIGINT/SIGTERM. The worker previously ran on a
+	// background context and could not be stopped at all.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	cfg, err := config.Load(ctx)
 	if err != nil {
-		slog.Error("failed to load config", "error", err)
-		os.Exit(1)
+		return err
 	}
 
 	log := logger.New(cfg.LogLevel, cfg.Environment)
 	slog.SetDefault(log)
 
-	log.Info("starting leadscraper",
-		"version", cfg.Version,
-		"environment", cfg.Environment,
-		"mode", map[bool]string{true: "worker", false: "api"}[isWorker],
-	)
-
-	rdb := redis.NewClient(&redis.Options{
-		Addr:     redisAddr(cfg.Redis.URL),
-		Password: cfg.Redis.Password,
-		DB:       0,
-	})
-
+	mode := "api"
 	if isWorker {
-		q := queue.NewRedisQueue(rdb, "leadscraper:jobs")
-		w := workers.NewWorker(q, log)
-		if err := w.Start(ctx); err != nil {
-			log.Error("worker error", "error", err)
-			os.Exit(1)
-		}
-		return
+		mode = "worker"
+	}
+	log.Info("starting leadscraper",
+		"version", cfg.Version, "environment", cfg.Environment, "mode", mode)
+
+	// ---- Redis ----
+	// ParseURL is the whole point here. redis.Options.Addr wants "host:port",
+	// so handing it the raw "redis://host:6379/0" URL made every dial fail.
+	redisOpts, err := redis.ParseURL(cfg.Redis.URL)
+	if err != nil {
+		return fmt.Errorf("parse REDIS_URL %q: %w", cfg.Redis.URL, err)
+	}
+	if cfg.Redis.Password != "" {
+		redisOpts.Password = cfg.Redis.Password
 	}
 
-	router := api.NewRouter(cfg.Version)
-	srv := api.NewServer(cfg.Port, router, log)
+	rdb := redis.NewClient(redisOpts)
+	defer rdb.Close()
 
-	if err := srv.Start(ctx); err != nil {
-		log.Error("server error", "error", err)
-		os.Exit(1)
+	if err := rdb.Ping(ctx).Err(); err != nil {
+		return fmt.Errorf("connect to redis at %s: %w", redisOpts.Addr, err)
+	}
+	log.Info("redis connected", "addr", redisOpts.Addr)
+
+	q := queue.NewRedisQueue(rdb, cfg.Redis.QueueKey)
+
+	// ---- Postgres ----
+	pool, err := postgres.NewPool(ctx, cfg.Database)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	log.Info("postgres connected")
+
+	if cfg.Database.AutoMigrate {
+		if err := postgres.RunMigrations(ctx, pool, cfg.Database.MigrationsDir, log); err != nil {
+			return err
+		}
+	}
+
+	r := newRepos(pool)
+	sources := newSources(cfg)
+
+	if isWorker {
+		deps := &workers.Deps{
+			Businesses:   r.businesses,
+			Websites:     r.websites,
+			Contacts:     r.contacts,
+			Socials:      r.socials,
+			Audits:       r.audits,
+			Scores:       r.scores,
+			Jobs:         r.jobs,
+			CrawlResults: r.crawls,
+			Technologies: r.techs,
+
+			Sources:    sources,
+			Crawler:    crawler.New(cfg.Crawler),
+			AI:         newAIProvider(cfg, log),
+			Scoring:    scoring.NewDefaultEngine(),
+			Queue:      q,
+			CrawlerCfg: cfg.Crawler,
+			AICfg:      cfg.AI,
+		}
+
+		return workers.NewWorker(q, deps, cfg.Worker, log).Start(ctx)
+	}
+
+	router := api.NewRouter(api.RouterDeps{
+		Version:    cfg.Version,
+		APIKey:     cfg.Auth.APIKey,
+		Pool:       pool,
+		Queue:      q,
+		Businesses: r.businesses,
+		Websites:   r.websites,
+		Contacts:   r.contacts,
+		Socials:    r.socials,
+		Scores:     r.scores,
+		Audits:     r.audits,
+		Jobs:       r.jobs,
+		Sources:    sources,
+	})
+
+	return api.NewServer(cfg.Port, router, log).Start(ctx)
+}
+
+type repos struct {
+	businesses *postgres.BusinessRepo
+	websites   *postgres.WebsiteRepo
+	contacts   *postgres.ContactRepo
+	socials    *postgres.SocialRepo
+	audits     *postgres.AuditRepo
+	scores     *postgres.ScoreRepo
+	jobs       *postgres.JobRepo
+	crawls     *postgres.CrawlResultRepo
+	techs      *postgres.TechnologyRepo
+}
+
+func newRepos(pool *pgxpool.Pool) *repos {
+	return &repos{
+		businesses: postgres.NewBusinessRepo(pool),
+		websites:   postgres.NewWebsiteRepo(pool),
+		contacts:   postgres.NewContactRepo(pool),
+		socials:    postgres.NewSocialRepo(pool),
+		audits:     postgres.NewAuditRepo(pool),
+		scores:     postgres.NewScoreRepo(pool),
+		jobs:       postgres.NewJobRepo(pool),
+		crawls:     postgres.NewCrawlResultRepo(pool),
+		techs:      postgres.NewTechnologyRepo(pool),
 	}
 }
 
-func redisAddr(url string) string {
-	if url == "" {
-		return "localhost:6379"
+// newSources registers only the adapters that are actually usable. Google
+// Places without a key would accept jobs and then fail every one of them, so
+// it is left out and /scrape reports it as an unknown source.
+func newSources(cfg *config.Config) map[string]ports.SourceAdapter {
+	sources := map[string]ports.SourceAdapter{
+		"csv": csv.NewAdapter(cfg.Sources.CSVDir),
 	}
-	return url
+
+	if cfg.Sources.GooglePlacesAPIKey != "" {
+		sources["google_maps"] = googlemaps.NewAdapter(cfg.Sources.GooglePlacesAPIKey)
+	} else {
+		slog.Warn("GOOGLE_PLACES_API_KEY not set: the google_maps source is disabled")
+	}
+
+	return sources
+}
+
+func newAIProvider(cfg *config.Config, log *slog.Logger) ai.Provider {
+	switch cfg.AI.Provider {
+	case "gemini":
+		log.Info("ai provider enabled", "provider", "gemini", "model", cfg.AI.Model)
+		return gemini.NewProvider(cfg.AI.APIKey, cfg.AI.Model, gemini.Options{
+			BaseURL:      cfg.AI.BaseURL,
+			Timeout:      cfg.AI.Timeout,
+			MaxHTMLChars: cfg.AI.MaxHTMLChars,
+		})
+	case "openai":
+		log.Info("ai provider enabled", "provider", "openai", "model", cfg.AI.Model)
+		return openai.NewProvider(cfg.AI.APIKey, cfg.AI.Model, openai.Options{
+			BaseURL:      cfg.AI.BaseURL,
+			Timeout:      cfg.AI.Timeout,
+			MaxHTMLChars: cfg.AI.MaxHTMLChars,
+		})
+	default:
+		log.Info("no AI provider configured; leads will be scored by rules only")
+		return ai.Noop{}
+	}
 }

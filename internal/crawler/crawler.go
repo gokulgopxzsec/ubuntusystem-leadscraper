@@ -102,6 +102,11 @@ func (c *Crawler) Crawl(ctx context.Context, rawURL string) (*Result, error) {
 		}
 	}
 
+	// SSL is a property of the URL, not of the fetch. Deriving it after the
+	// error check meant a site that is https but simply down got reported as
+	// "no HTTPS", which is a wrong reason to put in front of a salesperson.
+	res.HasSSL = strings.EqualFold(base.Scheme, "https")
+
 	landing := c.fetch(ctx, base.String())
 	res.Pages = append(res.Pages, landing)
 
@@ -111,7 +116,6 @@ func (c *Crawler) Crawl(ctx context.Context, rawURL string) (*Result, error) {
 	}
 
 	res.Reachable = landing.StatusCode > 0 && landing.StatusCode < 400
-	res.HasSSL = strings.EqualFold(base.Scheme, "https")
 	res.StatusCode = landing.StatusCode
 	res.LoadTimeMs = int(landing.LoadTime.Milliseconds())
 	res.Title = landing.Title

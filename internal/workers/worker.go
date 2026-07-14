@@ -2,56 +2,133 @@ package workers
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"math/rand"
+	"sync"
 	"time"
 
 	"github.com/makeforme/leadscraper/internal/queue"
+	"github.com/makeforme/leadscraper/pkg/config"
 )
 
+// Worker pulls jobs off the queue and runs them with bounded concurrency.
 type Worker struct {
 	queue queue.Queue
+	deps  *Deps
+	cfg   config.WorkerConfig
 	log   *slog.Logger
 }
 
-func NewWorker(q queue.Queue, log *slog.Logger) *Worker {
-	return &Worker{queue: q, log: log}
+func NewWorker(q queue.Queue, deps *Deps, cfg config.WorkerConfig, log *slog.Logger) *Worker {
+	return &Worker{queue: q, deps: deps, cfg: cfg, log: log}
 }
 
+// Start blocks until ctx is cancelled, then waits for in-flight jobs to finish
+// (up to ShutdownWait) before returning.
 func (w *Worker) Start(ctx context.Context) error {
-	w.log.Info("worker started, waiting for jobs")
+	w.log.Info("worker started",
+		"concurrency", w.cfg.Concurrency,
+		"job_timeout", w.cfg.JobTimeout)
+
+	// The buffered channel is the concurrency limiter: a slot must be free
+	// before we even ask Redis for the next job, so we never dequeue work we
+	// have no capacity to run.
+	slots := make(chan struct{}, w.cfg.Concurrency)
+	var wg sync.WaitGroup
 
 	for {
 		select {
 		case <-ctx.Done():
-			w.log.Info("worker stopped")
-			return nil
-		default:
-			w.processNext(ctx)
+			return w.drain(&wg)
+		case slots <- struct{}{}:
 		}
+
+		// A finite timeout is what makes cancellation observable; blocking
+		// forever here is what wedged the old worker on SIGTERM.
+		job, err := w.queue.Dequeue(ctx, 5*time.Second)
+		if err != nil {
+			<-slots
+
+			switch {
+			case errors.Is(err, queue.ErrEmpty):
+				continue
+			case ctx.Err() != nil:
+				return w.drain(&wg)
+			default:
+				w.log.Error("dequeue failed", "error", err)
+				// Usually Redis is unreachable. A tight loop would burn a core
+				// achieving nothing, so back off before trying again.
+				select {
+				case <-time.After(2 * time.Second):
+				case <-ctx.Done():
+					return w.drain(&wg)
+				}
+				continue
+			}
+		}
+
+		wg.Add(1)
+		go func(job *queue.Job) {
+			defer wg.Done()
+			defer func() { <-slots }()
+			w.run(ctx, job)
+		}(job)
 	}
 }
 
-func (w *Worker) processNext(ctx context.Context) {
-	job, err := w.queue.Dequeue(ctx)
-	if err != nil {
-		w.log.Error("dequeue failed", "error", err)
-		time.Sleep(5 * time.Second)
-		return
-	}
+func (w *Worker) drain(wg *sync.WaitGroup) error {
+	w.log.Info("worker draining in-flight jobs", "timeout", w.cfg.ShutdownWait)
 
-	w.log.Info("processing job", "type", job.Type, "id", job.ID)
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		w.log.Info("worker stopped cleanly")
+	case <-time.After(w.cfg.ShutdownWait):
+		w.log.Warn("worker shutdown timed out with jobs still running")
+	}
+	return nil
+}
+
+func (w *Worker) run(parent context.Context, job *queue.Job) {
+	log := w.log.With("job_id", job.ID, "type", job.Type)
+
+	// The job body is detached from the parent's cancellation but keeps a hard
+	// deadline. A job killed mid-write would leave the database inconsistent,
+	// so it gets JobTimeout to finish even once shutdown has begun.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), w.cfg.JobTimeout)
+	defer cancel()
+
+	// A panic in one handler must not take down the worker process.
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error("job panicked", "panic", r)
+			if err := w.queue.Requeue(context.WithoutCancel(parent), job, panicErr(r)); err != nil {
+				log.Error("requeue after panic failed", "error", err)
+			}
+		}
+	}()
+
+	start := time.Now()
+	log.Debug("job started")
 
 	if err := w.execute(ctx, job); err != nil {
-		w.log.Error("job failed", "type", job.Type, "id", job.ID, "error", err)
-		if reqErr := w.queue.Requeue(ctx, job); reqErr != nil {
-			w.log.Error("requeue failed", "id", job.ID, "error", reqErr)
+		log.Error("job failed", "error", err,
+			"retry_count", job.RetryCount, "elapsed", time.Since(start))
+
+		if err := w.queue.Requeue(context.WithoutCancel(parent), job, err); err != nil {
+			log.Error("requeue failed", "error", err)
 		}
 		return
 	}
 
-	w.log.Info("job completed", "type", job.Type, "id", job.ID)
-	sleepWithJitter()
+	log.Info("job completed", "elapsed", time.Since(start))
+	w.pause(parent)
 }
 
 func (w *Worker) execute(ctx context.Context, job *queue.Job) error {
@@ -73,44 +150,30 @@ func (w *Worker) execute(ctx context.Context, job *queue.Job) error {
 	case queue.JobGenRecommendation:
 		return w.genRecommendation(ctx, job)
 	default:
-		w.log.Warn("unknown job type", "type", job.Type)
+		// An unknown type will never become known. Returning nil retires it
+		// rather than cycling it through three pointless retries.
+		w.log.Warn("unknown job type, discarding", "type", job.Type, "job_id", job.ID)
 		return nil
 	}
 }
 
-func (w *Worker) collectBusiness(ctx context.Context, job *queue.Job) error {
-	return nil
+// pause spreads out the requests we make to third-party sites and APIs. It is
+// politeness, and it is why throughput is measured in leads per minute.
+func (w *Worker) pause(ctx context.Context) {
+	delay := w.cfg.MinJobDelay
+	if spread := w.cfg.MaxJobDelay - w.cfg.MinJobDelay; spread > 0 {
+		delay += time.Duration(rand.Int63n(int64(spread)))
+	}
+
+	select {
+	case <-time.After(delay):
+	case <-ctx.Done():
+	}
 }
 
-func (w *Worker) crawlWebsite(ctx context.Context, job *queue.Job) error {
-	return nil
-}
-
-func (w *Worker) extractContacts(ctx context.Context, job *queue.Job) error {
-	return nil
-}
-
-func (w *Worker) extractTechnology(ctx context.Context, job *queue.Job) error {
-	return nil
-}
-
-func (w *Worker) findSocials(ctx context.Context, job *queue.Job) error {
-	return nil
-}
-
-func (w *Worker) ruleScoring(ctx context.Context, job *queue.Job) error {
-	return nil
-}
-
-func (w *Worker) aiAudit(ctx context.Context, job *queue.Job) error {
-	return nil
-}
-
-func (w *Worker) genRecommendation(ctx context.Context, job *queue.Job) error {
-	return nil
-}
-
-func sleepWithJitter() {
-	sleepMs := 2000 + rand.Intn(6000)
-	time.Sleep(time.Duration(sleepMs) * time.Millisecond)
+func panicErr(r any) error {
+	if err, ok := r.(error); ok {
+		return err
+	}
+	return errors.New("panic in job handler")
 }
