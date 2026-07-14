@@ -28,9 +28,11 @@ func (r *WebsiteRepo) Create(ctx context.Context, w *domain.Website) error {
 	err := r.pool.QueryRow(ctx, `
 		INSERT INTO websites
 			(business_id, url, status_code, load_time_ms, has_ssl, has_booking,
-			 is_mobile_friendly, pages_crawled, title, meta_description, crawled_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+			 is_mobile_friendly, pages_crawled, title, meta_description, crawled_at,
+			 crawl_status)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
 		ON CONFLICT (business_id) DO UPDATE SET
+			crawl_status = EXCLUDED.crawl_status,
 			url = EXCLUDED.url,
 			status_code = EXCLUDED.status_code,
 			load_time_ms = EXCLUDED.load_time_ms,
@@ -44,7 +46,7 @@ func (r *WebsiteRepo) Create(ctx context.Context, w *domain.Website) error {
 		RETURNING id, created_at`,
 		w.BusinessID, w.URL, w.StatusCode, w.LoadTimeMs, w.HasSSL, w.HasBooking,
 		w.IsMobileFriendly, w.PagesCrawled, nullStr(w.Title),
-		nullStr(w.MetaDescription), w.CrawledAt,
+		nullStr(w.MetaDescription), w.CrawledAt, orUnknown(w.CrawlStatus),
 	).Scan(&w.ID, &w.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("upsert website: %w", err)
@@ -60,12 +62,13 @@ func (r *WebsiteRepo) GetByBusinessID(ctx context.Context, businessID string) (*
 	)
 	err := r.pool.QueryRow(ctx, `
 		SELECT id, business_id, url, status_code, load_time_ms, has_ssl, has_booking,
-		       is_mobile_friendly, pages_crawled, title, meta_description, crawled_at, created_at
+		       is_mobile_friendly, pages_crawled, title, meta_description, crawled_at,
+		       created_at, crawl_status
 		FROM websites WHERE business_id = $1
 		ORDER BY created_at DESC LIMIT 1`, businessID,
 	).Scan(&w.ID, &w.BusinessID, &w.URL, &statusCode, &loadMs, &w.HasSSL,
 		&w.HasBooking, &w.IsMobileFriendly, &w.PagesCrawled, &title, &metaDesc,
-		&w.CrawledAt, &w.CreatedAt)
+		&w.CrawledAt, &w.CreatedAt, &w.CrawlStatus)
 	if err != nil {
 		return nil, mapNoRows(fmt.Errorf("get website: %w", err))
 	}
@@ -734,4 +737,13 @@ func (r *TechnologyRepo) DeleteByWebsiteID(ctx context.Context, websiteID string
 		return fmt.Errorf("delete technologies: %w", err)
 	}
 	return nil
+}
+
+// orUnknown keeps the NOT NULL crawl_status column honest when a caller forgets
+// to set it.
+func orUnknown(s string) string {
+	if s == "" {
+		return "unknown"
+	}
+	return s
 }

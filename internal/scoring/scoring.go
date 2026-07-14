@@ -57,6 +57,16 @@ type EvalContext struct {
 	IsMobileFriendly bool
 	HasBooking       bool
 
+	// SiteDown means the site genuinely does not load: DNS failure, refused
+	// connection, timeout, or the server erroring. It is NOT set when the site
+	// merely blocked our crawler (a 403, a bot wall) or when robots.txt asked us
+	// not to look -- those sites are up, and scoring them as broken put "your
+	// website does not load" in front of businesses whose website was fine.
+	SiteDown bool
+	// SiteOpaque means the site is up but we could not see the page, so nothing
+	// about its content can be judged.
+	SiteOpaque bool
+
 	// SocialOnly means the only "website" the business has is an Instagram or
 	// Facebook page, or a link-in-bio. It is not a storefront, so HasWebsite
 	// must be false alongside it.
@@ -70,6 +80,16 @@ type ScoreResult struct {
 	Breakdown  map[Rule]int
 	MaxScore   int
 	Reasons    []string
+
+	// Unassessed means the site is up but we could not read it, so most rules
+	// never applied.
+	//
+	// This matters more than it looks. The percentage is a share of the rules
+	// that *could* apply, so when almost none of them can, the two or three that
+	// do fire produce a near-perfect score: a site behind a bot wall scored 91%
+	// and outranked businesses whose website was genuinely dead. We know almost
+	// nothing about these, and a confident score would be a lie.
+	Unassessed bool
 }
 
 // Percent is the score as a share of the maximum, which is what the priority
@@ -81,9 +101,38 @@ func (r ScoreResult) Percent() int {
 	return r.TotalScore * 100 / r.MaxScore
 }
 
+// RankedScore is what gets stored and sorted on.
+//
+// For a normal lead it is just the percentage. For one we could not assess it is
+// halved, because the percentage is only high in the first place thanks to a
+// collapsed denominator: a bot-walled site scored 91 and sorted above businesses
+// whose website was genuinely dead at 75. Capping the priority band was not
+// enough -- the list is sorted by score, so the uncertain lead still floated to
+// the top. Damping it puts the leads we actually know something about first,
+// which is the whole job of the ranking.
+func (r ScoreResult) RankedScore() int {
+	p := r.Percent()
+	if r.Unassessed {
+		return p / 2
+	}
+	return p
+}
+
 // Priority buckets the percentage into the three bands the schema allows.
 func (r ScoreResult) Priority() string {
-	switch p := r.Percent(); {
+	p := r.Percent()
+
+	// A lead we could not assess must never be presented as a strong one. Its
+	// percentage is high only because there was almost nothing to measure it
+	// against, and sending a salesperson at it on that basis wastes their call.
+	if r.Unassessed {
+		if p >= 60 {
+			return "medium"
+		}
+		return "low"
+	}
+
+	switch {
 	case p >= 60:
 		return "high"
 	case p >= 30:
@@ -115,9 +164,12 @@ func DefaultRules() []RuleDef {
 		},
 		{
 			Name: RuleBrokenWebsite, Weight: 25,
-			Reason:  "Website does not load. They are paying for something that is down.",
-			Eval:    func(c *EvalContext) bool { return !c.IsReachable },
-			Applies: hasSite,
+			Reason: "Website does not load. They are paying for something that is down.",
+			Eval:   func(c *EvalContext) bool { return c.SiteDown },
+			// Only meaningful when we actually managed to look. A site that blocked
+			// the crawler, or that robots.txt told us to leave alone, tells us
+			// nothing -- and must not be scored as broken.
+			Applies: func(c *EvalContext) bool { return c.HasWebsite && !c.SiteOpaque },
 		},
 		{
 			Name: RuleNotMobile, Weight: 15,
@@ -185,7 +237,12 @@ func NewDefaultEngine() *Engine {
 }
 
 func (e *Engine) Evaluate(ctx *EvalContext) ScoreResult {
-	res := ScoreResult{Breakdown: make(map[Rule]int, len(e.rules))}
+	res := ScoreResult{
+		Breakdown: make(map[Rule]int, len(e.rules)),
+		// A site that blocked the crawler leaves most rules inapplicable, which
+		// would otherwise inflate its percentage into a false "high priority".
+		Unassessed: ctx.SiteOpaque && ctx.HasWebsite,
+	}
 
 	for _, rule := range e.rules {
 		// A rule that cannot apply contributes to neither the score nor the
@@ -227,6 +284,14 @@ func (r ScoreResult) SalesSuggestion(businessName string, ctx *EvalContext) stri
 			"%s is a top lead. They sell through %s with no real storefront, so every order goes through DMs. "+
 				"Show them a makeforme.in link they can put in their bio today and take payments straight away.",
 			businessName, platform)
+	}
+
+	// Say plainly that we could not look, rather than dressing up a guess.
+	if r.Unassessed {
+		return fmt.Sprintf(
+			"%s has a working website that blocked our crawler, so we could not assess it. "+
+				"Open it by hand before calling: the score below is based only on what we could see from outside.",
+			businessName)
 	}
 
 	lead := r.Reasons[0]

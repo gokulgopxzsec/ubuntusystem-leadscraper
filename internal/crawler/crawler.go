@@ -28,10 +28,36 @@ type Page struct {
 	Err        error
 }
 
+// Status is what we actually learned about a website.
+//
+// A boolean "reachable" was not enough, and got the pipeline badly wrong: a 403
+// from a bot-protection layer and a robots.txt that told us not to look were both
+// recorded as unreachable, and then scored as "their website is down". Those
+// sites are up. Telling a business their site is broken when it is merely
+// defended is the kind of mistake that ends a sales call.
+type Status string
+
+const (
+	// StatusLive means we fetched the page and it rendered.
+	StatusLive Status = "live"
+	// StatusDown means nobody could reach it: DNS failure, refused connection,
+	// timeout, or the server itself erroring. This is the one that is a lead.
+	StatusDown Status = "down"
+	// StatusBlocked means the site is up and would not let us in — a 403, a 429,
+	// a bot wall. We know nothing about the page, so we must not judge it.
+	StatusBlocked Status = "blocked"
+	// StatusUnknown means we chose not to look (robots.txt) or could not tell.
+	StatusUnknown Status = "unknown"
+)
+
 // Result is everything a single-site crawl produced.
 type Result struct {
-	BaseURL        string
-	Pages          []Page
+	BaseURL string
+	Pages   []Page
+	Status  Status
+
+	// Reachable is Status == StatusLive. Kept because most callers only care
+	// whether there is a page to assess.
 	Reachable      bool
 	HasSSL         bool
 	StatusCode     int
@@ -42,6 +68,39 @@ type Result struct {
 	HasContactForm bool
 	HasBooking     bool
 	Error          string
+}
+
+// classify turns an HTTP status into what it actually tells us about the site.
+func classify(code int, err error) Status {
+	if err != nil {
+		// No response at all: DNS did not resolve, the connection was refused,
+		// or it timed out. The site really is unreachable.
+		return StatusDown
+	}
+
+	switch {
+	case code >= 200 && code < 400:
+		return StatusLive
+
+	case code == 401, code == 403, code == 405, code == 406, code == 429:
+		// The server answered, and said no. It is running.
+		return StatusBlocked
+
+	case code == 451:
+		return StatusBlocked
+
+	case code >= 500:
+		// The server is erroring. From a customer's point of view the site is
+		// broken, which is exactly the signal we want.
+		return StatusDown
+
+	case code == 404, code == 410:
+		// A homepage that 404s is broken for a visitor too.
+		return StatusDown
+
+	default:
+		return StatusUnknown
+	}
 }
 
 type Crawler struct {
@@ -94,29 +153,41 @@ func (c *Crawler) Crawl(ctx context.Context, rawURL string) (*Result, error) {
 
 	res := &Result{BaseURL: base.String()}
 
-	if c.cfg.RespectRobots {
-		allowed, err := c.robots.allowed(ctx, base)
-		if err == nil && !allowed {
-			res.Error = "disallowed by robots.txt"
-			return res, nil
-		}
-	}
-
 	// SSL is a property of the URL, not of the fetch. Deriving it after the
 	// error check meant a site that is https but simply down got reported as
 	// "no HTTPS", which is a wrong reason to put in front of a salesperson.
 	res.HasSSL = strings.EqualFold(base.Scheme, "https")
 
+	if c.cfg.RespectRobots {
+		allowed, err := c.robots.allowed(ctx, base)
+		if err == nil && !allowed {
+			// We chose not to look. That says nothing about whether the site
+			// works, and it used to be scored as "their website is down".
+			res.Status = StatusUnknown
+			res.Error = "not crawled: disallowed by robots.txt"
+			return res, nil
+		}
+	}
+
 	landing := c.fetch(ctx, base.String())
 	res.Pages = append(res.Pages, landing)
+
+	res.Status = classify(landing.StatusCode, landing.Err)
+	res.StatusCode = landing.StatusCode
+	res.Reachable = res.Status == StatusLive
 
 	if landing.Err != nil {
 		res.Error = landing.Err.Error()
 		return res, nil
 	}
 
-	res.Reachable = landing.StatusCode > 0 && landing.StatusCode < 400
-	res.StatusCode = landing.StatusCode
+	// The server answered but would not show us the page. We know it is running
+	// and nothing else, so there is nothing here to assess.
+	if res.Status != StatusLive {
+		res.Error = fmt.Sprintf("http %d", landing.StatusCode)
+		return res, nil
+	}
+
 	res.LoadTimeMs = int(landing.LoadTime.Milliseconds())
 	res.Title = landing.Title
 	res.MetaDesc = landing.MetaTags["description"]

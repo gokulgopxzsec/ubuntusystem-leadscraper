@@ -118,6 +118,7 @@
   .tag.social { background:rgba(255,92,122,.15); color:var(--hot); }
   .tag.noweb  { background:rgba(255,122,69,.15); color:var(--high); }
   .tag.dead   { background:rgba(240,71,95,.15); color:var(--danger); }
+  .tag.blocked{ background:var(--panel-2); color:var(--muted); border:1px solid var(--line-2); }
   .tag.site   { background:var(--panel-2); color:var(--dim); }
 
   a { color:var(--accent); }
@@ -205,6 +206,18 @@
     </select>
     <select id="f-cat"><option value="">All categories</option></select>
     <select id="f-src"><option value="">All sources</option></select>
+    <select id="f-reviews">
+      <option value="">Any reviews</option>
+      <option value="10">10+ reviews</option>
+      <option value="50">50+ reviews</option>
+      <option value="200">200+ reviews</option>
+      <option value="500">500+ reviews</option>
+    </select>
+    <select id="f-contact">
+      <option value="">Any contact</option>
+      <option value="phone">Has a phone</option>
+      <option value="email">Has an email</option>
+    </select>
     <button class="ghost" id="btn-export">Export CSV</button>
   </div>
 
@@ -322,7 +335,7 @@ function toast(msg, err) {
 
 const state = {
   page: 1, limit: 50, sort: 'score', order: 'desc',
-  priority: '', web: '', category: '', source: '',
+  priority: '', web: '', category: '', source: '', min_reviews: '', contact: '',
 };
 let rows = [];
 let total = 0;
@@ -333,9 +346,14 @@ const gap = (l, k) => (l.score && (l.score.breakdown || {})[k]) > 0;
 const isSocial = (l) => gap(l, 'social_only');
 const isNoWeb  = (l) => gap(l, 'no_website');
 const isDead   = (l) => gap(l, 'broken_website');
+// A site that answered 403 is up and refusing us. It is not a lead, and it must
+// not be labelled "site down" -- that is a sentence you would say out loud on a
+// call, and it would be wrong.
+const isBlocked = (l) => l.site_status === 'blocked' || l.site_status === 'unknown';
 
 const priClass = (l) => isSocial(l) ? 'p-hot' : 'p-' + (l.score ? l.score.priority : 'low');
-const anyFilter = () => state.priority || state.web || state.category || state.source;
+const anyFilter = () => state.priority || state.web || state.category
+  || state.source || state.min_reviews || state.contact;
 const host = (u) => { try { return new URL(u).host.replace(/^www\./, ''); } catch { return u; } };
 const short = (s, n) => (s && s.length > n) ? s.slice(0, n) + '...' : (s || '');
 
@@ -348,6 +366,9 @@ function qs() {
   for (const k of ['priority', 'web', 'category', 'source']) {
     if (state[k]) p.set(k, state[k]);
   }
+  if (state.min_reviews) p.set('min_reviews', state.min_reviews);
+  if (state.contact === 'phone') p.set('has_phone', 'true');
+  if (state.contact === 'email') p.set('has_email', 'true');
   return p.toString();
 }
 
@@ -448,11 +469,12 @@ function render() {
     const meta = b.metadata || {};
 
     let web;
-    if (isSocial(l))     web = '<span class="tag social">social only</span>';
-    else if (isNoWeb(l)) web = '<span class="tag noweb">no website</span>';
-    else if (isDead(l))  web = '<span class="tag dead">site down</span>';
-    else if (b.website)  web = `<a class="q" href="${esc(b.website)}" target="_blank" rel="noopener">${esc(host(b.website))}</a>`;
-    else                 web = '<span class="tag site">unknown</span>';
+    if (isSocial(l))        web = '<span class="tag social">social only</span>';
+    else if (isNoWeb(l))    web = '<span class="tag noweb">no website</span>';
+    else if (isDead(l))     web = '<span class="tag dead">site down</span>';
+    else if (isBlocked(l))  web = `<span class="tag blocked" title="The site is up but blocked our crawler, so we could not assess it">not checked</span>`;
+    else if (b.website)     web = `<a class="q" href="${esc(b.website)}" target="_blank" rel="noopener">${esc(host(b.website))}</a>`;
+    else                    web = '<span class="tag site">unknown</span>';
 
     const contact = l.email || b.phone;
 
@@ -910,7 +932,8 @@ $('chk-all').onclick = () => {
 
 $('q').onkeydown = (e) => { if (e.key === 'Enter') runSearch(); };
 
-for (const [id, key] of [['f-pri', 'priority'], ['f-web', 'web'], ['f-cat', 'category'], ['f-src', 'source']]) {
+for (const [id, key] of [['f-pri', 'priority'], ['f-web', 'web'], ['f-cat', 'category'],
+                         ['f-src', 'source'], ['f-reviews', 'min_reviews'], ['f-contact', 'contact']]) {
   $(id).onchange = () => {
     state[key] = $(id).value;
     state.page = 1;

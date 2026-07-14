@@ -43,8 +43,11 @@ type LeadFilter struct {
 	Web      WebPresence
 
 	MinScore int
-	HasPhone bool
-	HasEmail bool
+	// MinReviews filters out the long tail. A business with two reviews may not
+	// really be trading, and is not worth a call.
+	MinReviews int
+	HasPhone   bool
+	HasEmail   bool
 
 	SortBy    string
 	SortOrder string
@@ -62,7 +65,12 @@ type Lead struct {
 	ContactCount int    `json:"contact_count"`
 	SocialCount  int    `json:"social_count"`
 	Email        string `json:"email,omitempty"`
-	SiteStatus   int    `json:"site_status,omitempty"`
+	// SiteStatus is the crawl verdict: live | down | blocked | unknown. The UI
+	// needs it to tell "their site is down" (a lead) apart from "their site
+	// blocked our crawler" (not a lead, and not something to say on a call).
+	SiteStatus string `json:"site_status,omitempty"`
+	// SiteCode is the raw HTTP status, for the detail view.
+	SiteCode int `json:"site_code,omitempty"`
 }
 
 func (r *LeadRepo) List(ctx context.Context, f LeadFilter) ([]*Lead, int64, error) {
@@ -89,6 +97,9 @@ func (r *LeadRepo) List(ctx context.Context, f LeadFilter) ([]*Lead, int64, erro
 	}
 	if f.MinScore > 0 {
 		add("s.total_score >= $%d", f.MinScore)
+	}
+	if f.MinReviews > 0 {
+		add("coalesce((b.metadata->>'review_count')::int, 0) >= $%d", f.MinReviews)
 	}
 
 	// Web presence reads off the score breakdown rather than the website column,
@@ -145,7 +156,8 @@ func (r *LeadRepo) List(ctx context.Context, f LeadFilter) ([]*Lead, int64, erro
 		       (SELECT c.email FROM contacts c
 		         WHERE c.business_id = b.id AND coalesce(c.email,'') <> ''
 		         ORDER BY c.confidence DESC LIMIT 1),
-		       (SELECT w.status_code FROM websites w WHERE w.business_id = b.id)
+		       (SELECT w.status_code FROM websites w WHERE w.business_id = b.id),
+		       (SELECT w.crawl_status FROM websites w WHERE w.business_id = b.id)
 		%s%s
 		ORDER BY %s
 		LIMIT $%d OFFSET $%d`,
@@ -174,13 +186,14 @@ func (r *LeadRepo) List(ctx context.Context, f LeadFilter) ([]*Lead, int64, erro
 
 			contactCount, socialCount int
 			email                     *string
-			siteStatus                *int32
+			siteCode                  *int32
+			siteStatus                *string
 		)
 
 		err := rows.Scan(&b.ID, &b.Name, &addr, &phone, &rating, &website, &category,
 			&b.Source, &metadata, &b.CreatedAt, &b.UpdatedAt,
 			&totalScore, &ruleScore, &aiScore, &priority, &breakdown, &suggestion, &scoredAt,
-			&contactCount, &socialCount, &email, &siteStatus)
+			&contactCount, &socialCount, &email, &siteCode, &siteStatus)
 		if err != nil {
 			return nil, 0, fmt.Errorf("scan lead: %w", err)
 		}
@@ -195,7 +208,8 @@ func (r *LeadRepo) List(ctx context.Context, f LeadFilter) ([]*Lead, int64, erro
 			ContactCount: contactCount,
 			SocialCount:  socialCount,
 			Email:        str(email),
-			SiteStatus:   i32(siteStatus),
+			SiteCode:     i32(siteCode),
+			SiteStatus:   str(siteStatus),
 		}
 
 		if priority != nil {

@@ -3,10 +3,14 @@ package domain
 import "time"
 
 type Website struct {
-	ID               string       `json:"id"`
-	BusinessID       string       `json:"business_id"`
-	URL              string       `json:"url"`
-	StatusCode       int          `json:"status_code,omitempty"`
+	ID         string `json:"id"`
+	BusinessID string `json:"business_id"`
+	URL        string `json:"url"`
+	StatusCode int    `json:"status_code,omitempty"`
+	// CrawlStatus is live | down | blocked | unknown. A bare status code cannot
+	// tell "nobody could reach it" apart from "it refused to let us in", and that
+	// difference decides whether this is a lead or a false alarm.
+	CrawlStatus      string       `json:"crawl_status,omitempty"`
 	LoadTimeMs       int          `json:"load_time_ms,omitempty"`
 	HasSSL           bool         `json:"has_ssl"`
 	HasBooking       bool         `json:"has_booking"`

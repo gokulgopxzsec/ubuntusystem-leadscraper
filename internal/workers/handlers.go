@@ -193,6 +193,7 @@ func (w *Worker) crawlWebsite(ctx context.Context, job *queue.Job) error {
 		PagesCrawled:     len(res.Pages),
 		Title:            res.Title,
 		MetaDescription:  res.MetaDesc,
+		CrawlStatus:      string(res.Status),
 	}
 	now := time.Now().UTC()
 	site.CrawledAt = &now
@@ -201,11 +202,13 @@ func (w *Worker) crawlWebsite(ctx context.Context, job *queue.Job) error {
 		return fmt.Errorf("store website: %w", err)
 	}
 
-	// An unreachable site is a finding, not a failure: "their website is down"
-	// is one of the strongest sales signals we have. Record it and score it.
+	// Not being able to read the page is a finding, not a failure. But *why* we
+	// could not read it matters enormously: genuinely down is the strongest lead
+	// we have, while blocked-by-bot-protection means the site is fine and we
+	// simply were not let in.
 	if !res.Reachable {
-		w.log.Info("website unreachable, scoring anyway",
-			"business_id", job.BusinessID, "url", job.URL, "error", res.Error)
+		w.log.Info("no page to assess", "business_id", job.BusinessID, "url", job.URL,
+			"status", res.Status, "http", res.StatusCode, "detail", res.Error)
 
 		if err := w.storeCrawlResult(ctx, site.ID, res, job.URL); err != nil {
 			return err
@@ -477,7 +480,12 @@ func (w *Worker) ruleScoring(ctx context.Context, job *queue.Job) error {
 	// A website row exists only if a crawl ran, so its absence is not an error.
 	site, err := w.deps.Websites.GetByBusinessID(ctx, job.BusinessID)
 	if err == nil && !evalCtx.SocialOnly {
-		evalCtx.IsReachable = site.StatusCode > 0 && site.StatusCode < 400
+		// The crawl's own verdict, not a guess from the status code: a 403 means
+		// the site is up and blocking us, which is not the same as being down.
+		evalCtx.IsReachable = site.CrawlStatus == string(crawler.StatusLive)
+		evalCtx.SiteDown = site.CrawlStatus == string(crawler.StatusDown)
+		evalCtx.SiteOpaque = site.CrawlStatus == string(crawler.StatusBlocked) ||
+			site.CrawlStatus == string(crawler.StatusUnknown)
 		evalCtx.HasSSL = site.HasSSL
 		evalCtx.HasBooking = site.HasBooking
 		evalCtx.IsMobileFriendly = site.IsMobileFriendly
@@ -507,7 +515,9 @@ func (w *Worker) ruleScoring(ctx context.Context, job *queue.Job) error {
 	score := &domain.LeadScore{
 		BusinessID: job.BusinessID,
 		RuleScore:  result.TotalScore,
-		TotalScore: result.Percent(),
+		// RankedScore, not Percent: a lead we could not assess has an inflated
+		// percentage (few rules applied), and the list is sorted by this.
+		TotalScore: result.RankedScore(),
 		Priority:   result.Priority(),
 		Breakdown:  breakdownToMap(result.Breakdown),
 	}
@@ -517,7 +527,7 @@ func (w *Worker) ruleScoring(ctx context.Context, job *queue.Job) error {
 	if audit, err := w.deps.Audits.GetByBusinessID(ctx, job.BusinessID); err == nil {
 		avg := (audit.QualityScore + audit.SEOScore + audit.MobileScore) / 3
 		score.AIScore = (10 - avg) * 10
-		score.TotalScore = (result.Percent()*7 + score.AIScore*3) / 10
+		score.TotalScore = (result.RankedScore()*7 + score.AIScore*3) / 10
 	}
 
 	score.SalesSuggestion = result.SalesSuggestion(business.Name, evalCtx)

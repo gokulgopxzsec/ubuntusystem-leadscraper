@@ -32,18 +32,19 @@ func (h *LeadHandler) filter(r *http.Request) postgres.LeadFilter {
 	q := r.URL.Query()
 
 	return postgres.LeadFilter{
-		Search:    q.Get("search"),
-		Priority:  q.Get("priority"),
-		Category:  q.Get("category"),
-		Source:    q.Get("source"),
-		Web:       postgres.WebPresence(q.Get("web")),
-		MinScore:  queryInt(r, "min_score", 0),
-		HasPhone:  q.Get("has_phone") == "true",
-		HasEmail:  q.Get("has_email") == "true",
-		SortBy:    q.Get("sort"),
-		SortOrder: q.Get("order"),
-		Page:      queryInt(r, "page", 1),
-		Limit:     queryInt(r, "limit", 50),
+		Search:     q.Get("search"),
+		Priority:   q.Get("priority"),
+		Category:   q.Get("category"),
+		Source:     q.Get("source"),
+		Web:        postgres.WebPresence(q.Get("web")),
+		MinScore:   queryInt(r, "min_score", 0),
+		MinReviews: queryInt(r, "min_reviews", 0),
+		HasPhone:   q.Get("has_phone") == "true",
+		HasEmail:   q.Get("has_email") == "true",
+		SortBy:     q.Get("sort"),
+		SortOrder:  q.Get("order"),
+		Page:       queryInt(r, "page", 1),
+		Limit:      queryInt(r, "limit", 50),
 	}
 }
 
