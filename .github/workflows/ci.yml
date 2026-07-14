@@ -1,0 +1,44 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: build
+        run: go build ./...
+
+      - name: vet
+        run: go vet ./...
+
+      - name: test
+        run: go test ./... -count=1
+
+      # gofmt is not just style here: an unformatted file usually means something
+      # was patched by hand and not re-checked.
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l ./cmd ./internal ./pkg)"
+          if [ -n "$unformatted" ]; then
+            echo "these files are not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      # The deploy script runs these on the server. A syntax error in them would
+      # otherwise only surface at deploy time, which is the worst moment to find it.
+      - name: shellcheck the scripts
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y shellcheck
+          bash -n scripts/*.sh run.sh
+          shellcheck -S error scripts/*.sh run.sh

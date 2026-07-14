@@ -1,4 +1,4 @@
-.PHONY: build start run run-worker run-all test test-cover lint clean \
+.PHONY: build start run run-worker run-all test test-cover lint clean deploy ci \
         docker-build docker-up docker-down docker-logs docker-ps \
         dev-deps dev-deps-down smoke migrate-create
 
@@ -12,6 +12,21 @@ build:
 ## start: the whole app in one command (deps, build, API + worker + dashboard).
 start:
 	./run.sh
+
+## deploy: pull, verify, restart -- and roll back if it does not come up healthy.
+## Run on the server. The systemd timer runs this automatically every 2 minutes.
+deploy:
+	./scripts/deploy.sh
+
+## ci: exactly what the CI workflow runs, so you can check before you push.
+ci:
+	go build ./...
+	go vet ./...
+	go test ./... -count=1
+	@if [ -n "$$(gofmt -l ./cmd ./internal ./pkg)" ]; then \
+		echo "not gofmt'd:"; gofmt -l ./cmd ./internal ./pkg; exit 1; \
+	fi
+	@echo "  all CI gates pass"
 
 ## run: API and dashboard only. Pair with run-worker in a second terminal.
 run:
